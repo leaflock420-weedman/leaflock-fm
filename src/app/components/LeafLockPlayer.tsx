@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import {
   Disc3,
   Loader2,
+  MonitorPlay,
   Pause,
   Play,
   Shuffle,
@@ -48,6 +49,7 @@ type YTPlayer = {
   unMute: () => void;
   isMuted: () => boolean;
   destroy: () => void;
+  setSize: (width: number, height: number) => void;
 };
 
 type YTNamespace = {
@@ -81,6 +83,7 @@ declare global {
 }
 
 const BLEND_ENABLED_KEY = "leaflock-dj-blend-enabled";
+const SHOW_VIDEO_KEY = "leaflock-show-video";
 
 function loadYouTubeApi(): Promise<YTNamespace> {
   return new Promise((resolve, reject) => {
@@ -223,8 +226,11 @@ export default function LeafLockPlayer({
   const [scrubTime, setScrubTime] = useState(0);
   const [controlsOffscreen, setControlsOffscreen] = useState(false);
   const [portalReady, setPortalReady] = useState(false);
+  const [showVideo, setShowVideo] = useState(false);
+  const [activeDeck, setActiveDeck] = useState<DeckId>("a");
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const videoShellRef = useRef<HTMLDivElement | null>(null);
   const mediaBridgeRef = useRef<HTMLAudioElement | null>(null);
   const playersRef = useRef<Record<DeckId, YTPlayer | null>>({ a: null, b: null });
   const playersReadyRef = useRef<Record<DeckId, boolean>>({ a: false, b: false });
@@ -466,6 +472,7 @@ export default function LeafLockPlayer({
       applyDeckVolume(incomingDeck, 1);
 
       activeDeckRef.current = incomingDeck;
+      setActiveDeck(incomingDeck);
       blendInProgressRef.current = false;
       setIsBlending(false);
       setIsBuffering(false);
@@ -736,10 +743,41 @@ export default function LeafLockPlayer({
     try {
       const stored = window.localStorage.getItem(BLEND_ENABLED_KEY);
       if (stored === "0") setDjBlendEnabled(false);
+      if (window.localStorage.getItem(SHOW_VIDEO_KEY) === "1") {
+        setShowVideo(true);
+      }
     } catch {
       // Ignore storage errors.
     }
   }, []);
+
+  const resizePlayerHosts = useCallback(() => {
+    const shell = videoShellRef.current;
+    const width = showVideo && shell ? shell.clientWidth : 2;
+    const height = showVideo && shell ? shell.clientHeight : 2;
+
+    (["a", "b"] as DeckId[]).forEach((deck) => {
+      playersRef.current[deck]?.setSize(width, height);
+    });
+  }, [showVideo]);
+
+  useEffect(() => {
+    if (!playersReady) return;
+    resizePlayerHosts();
+  }, [playersReady, resizePlayerHosts, showVideo, activeDeck, isBlending]);
+
+  useEffect(() => {
+    if (!showVideo) return;
+
+    const shell = videoShellRef.current;
+    if (!shell || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      resizePlayerHosts();
+    });
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, [showVideo, resizePlayerHosts]);
 
   useEffect(() => {
     const mobile =
@@ -1139,6 +1177,18 @@ export default function LeafLockPlayer({
     });
   };
 
+  const toggleVideo = () => {
+    setShowVideo((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(SHOW_VIDEO_KEY, next ? "1" : "0");
+      } catch {
+        // Ignore storage errors.
+      }
+      return next;
+    });
+  };
+
   const toggleMute = () => {
     const player = getActivePlayer();
     if (!player || !playersReady) return;
@@ -1281,21 +1331,38 @@ export default function LeafLockPlayer({
             <p className="mt-0.5 text-sm text-zinc-400">{subtitle ?? "Stay Locked"}</p>
           </div>
 
-        <button
-          type="button"
-          onClick={toggleDjBlend}
-          className={`w-full rounded-full border px-4 py-2.5 text-xs font-semibold uppercase tracking-[0.18em] transition-colors sm:w-auto sm:py-2 ${
-            djBlendEnabled
-              ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
-              : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-white"
-          }`}
-          aria-pressed={djBlendEnabled}
-        >
-          <span className="inline-flex items-center justify-center gap-2">
-            <Disc3 className="h-3.5 w-3.5" />
-            DJ Blend {djBlendEnabled ? "On" : "Off"}
-          </span>
-        </button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <button
+            type="button"
+            onClick={toggleDjBlend}
+            className={`w-full rounded-full border px-4 py-2.5 text-xs font-semibold uppercase tracking-[0.18em] transition-colors sm:w-auto sm:py-2 ${
+              djBlendEnabled
+                ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-white"
+            }`}
+            aria-pressed={djBlendEnabled}
+          >
+            <span className="inline-flex items-center justify-center gap-2">
+              <Disc3 className="h-3.5 w-3.5" />
+              DJ Blend {djBlendEnabled ? "On" : "Off"}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={toggleVideo}
+            className={`w-full rounded-full border px-4 py-2.5 text-xs font-semibold uppercase tracking-[0.18em] transition-colors sm:w-auto sm:py-2 ${
+              showVideo
+                ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-white"
+            }`}
+            aria-pressed={showVideo}
+          >
+            <span className="inline-flex items-center justify-center gap-2">
+              <MonitorPlay className="h-3.5 w-3.5" />
+              Video {showVideo ? "On" : "Off"}
+            </span>
+          </button>
+        </div>
         </div>
       </div>
 
@@ -1320,6 +1387,37 @@ export default function LeafLockPlayer({
             source="playlist"
           />
         </div>
+      </div>
+
+      <div
+        ref={videoShellRef}
+        className={
+          showVideo
+            ? "relative mb-5 aspect-video w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black sm:mb-6"
+            : "pointer-events-none absolute left-0 top-0 h-[2px] w-[2px] overflow-hidden opacity-[0.01]"
+        }
+        aria-hidden={!showVideo}
+      >
+        <div
+          ref={playerHostARef}
+          className={
+            showVideo
+              ? `absolute inset-0 h-full w-full transition-opacity duration-300 ${
+                  activeDeck === "a" || isBlending ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+                }`
+              : "h-[2px] w-[2px]"
+          }
+        />
+        <div
+          ref={playerHostBRef}
+          className={
+            showVideo
+              ? `absolute inset-0 h-full w-full transition-opacity duration-300 ${
+                  activeDeck === "b" || isBlending ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+                }`
+              : "h-[2px] w-[2px]"
+          }
+        />
       </div>
 
       <div className="mb-6">
@@ -1472,14 +1570,6 @@ export default function LeafLockPlayer({
             Instagram
           </a>
         </div>
-      </div>
-
-      <div
-        className="pointer-events-none absolute left-0 top-0 h-[2px] w-[2px] overflow-hidden opacity-[0.01]"
-        aria-hidden
-      >
-        <div ref={playerHostARef} className="h-[2px] w-[2px]" />
-        <div ref={playerHostBRef} className="h-[2px] w-[2px]" />
       </div>
 
       <audio
