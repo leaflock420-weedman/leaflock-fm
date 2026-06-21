@@ -38,7 +38,7 @@ export default function LeafLockLogo({ className = "", onSecretTap }: LeafLockLo
         alt="LeafLock"
         width={680}
         height={120}
-        className={`h-auto w-full bg-transparent object-contain object-left ${useFallback ? "" : "[mix-blend-mode:normal]"}`}
+        className="h-auto w-full bg-transparent object-contain object-left"
         onError={() => setUseFallback(true)}
         priority
       />
