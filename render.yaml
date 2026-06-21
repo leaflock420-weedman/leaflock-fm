@@ -6,6 +6,8 @@ services:
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /
+    domains:
+      - fm.leaflock.com.au
     envVars:
       - key: NODE_ENV
         value: production
