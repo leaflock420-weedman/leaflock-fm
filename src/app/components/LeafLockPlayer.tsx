@@ -13,6 +13,7 @@ import {
   VolumeX
 } from "lucide-react";
 import LoveButton from "@/components/LoveButton";
+import LeafLockLogo from "@/components/LeafLockLogo";
 import {
   BLEND_POLL_INTERVAL_MS,
   TOTAL_BLEND_MS,
@@ -1044,52 +1045,59 @@ export default function LeafLockPlayer() {
   };
 
   return (
-    <div className="relative w-full max-w-2xl mx-auto bg-zinc-950 border border-zinc-800 rounded-3xl p-8 md:p-10 shadow-2xl">
-      <div className="flex items-center justify-between mb-6 gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <div
-              className={`w-3 h-3 rounded-full ${
-                isBlending
-                  ? "bg-amber-400 animate-pulse"
-                  : isConnected && isPlaying
-                    ? "bg-emerald-500 animate-pulse"
-                    : "bg-zinc-600"
-              }`}
-            />
-            <span className="text-emerald-500 text-sm font-medium tracking-[3px] uppercase flex items-center gap-2">
-              <Shuffle className="w-3.5 h-3.5" />
-              {djBlendEnabled ? "DJ BLEND" : "SHUFFLE"}
-            </span>
+    <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
+      <div className="mb-5 flex flex-col gap-4 sm:mb-6">
+        <LeafLockLogo
+          className="mx-auto sm:mx-0"
+          onSecretTap={() => window.dispatchEvent(new Event("leaflock:open-desk"))}
+        />
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 text-center sm:text-left">
+            <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start sm:gap-3">
+              <div
+                className={`h-2.5 w-2.5 shrink-0 rounded-full sm:h-3 sm:w-3 ${
+                  isBlending
+                    ? "animate-pulse bg-amber-400"
+                    : isConnected && isPlaying
+                      ? "animate-pulse bg-emerald-500"
+                      : "bg-zinc-600"
+                }`}
+              />
+              <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.2em] text-emerald-500 sm:text-sm sm:tracking-[3px]">
+                <Shuffle className="h-3.5 w-3.5" />
+                {djBlendEnabled ? "DJ Blend" : "Shuffle"}
+              </span>
+            </div>
+            <h1 className="mt-1 text-xl font-semibold tracking-tight text-white sm:text-3xl">FM 104.2</h1>
+            <p className="mt-0.5 text-sm text-zinc-400">Stay Locked</p>
           </div>
-          <h1 className="text-4xl md:text-5xl font-semibold tracking-tighter text-white mt-1">
-            LeafLock FM 104.2
-          </h1>
-          <p className="text-zinc-400 text-lg mt-1">— Stay Locked</p>
-        </div>
 
         <button
           type="button"
           onClick={toggleDjBlend}
-          className={`shrink-0 rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] transition-colors ${
+          className={`w-full rounded-full border px-4 py-2.5 text-xs font-semibold uppercase tracking-[0.18em] transition-colors sm:w-auto sm:py-2 ${
             djBlendEnabled
               ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
               : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-white"
           }`}
           aria-pressed={djBlendEnabled}
         >
-          <span className="inline-flex items-center gap-2">
+          <span className="inline-flex items-center justify-center gap-2">
             <Disc3 className="h-3.5 w-3.5" />
             DJ Blend {djBlendEnabled ? "On" : "Off"}
           </span>
         </button>
+        </div>
       </div>
 
-      <div className="mb-6 min-h-[60px]">
-        <div className="text-xs uppercase tracking-[2px] text-zinc-500 mb-1">NOW PLAYING</div>
-        <div className="text-2xl md:text-3xl font-medium text-white leading-tight">
-          {nowPlaying.title}
-          <span className="block text-xl text-zinc-400 mt-1">{nowPlaying.artist}</span>
+      <div className="mb-5 min-h-[56px] sm:mb-6 sm:min-h-[60px]">
+        <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500 sm:text-xs sm:tracking-[2px]">
+          NOW PLAYING
+        </div>
+        <div className="text-lg font-medium leading-snug text-white sm:text-2xl md:text-3xl">
+          <span className="line-clamp-2">{nowPlaying.title}</span>
+          <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">{nowPlaying.artist}</span>
         </div>
         {upNext ? (
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-amber-400/80">
@@ -1135,13 +1143,13 @@ export default function LeafLockPlayer() {
         </div>
       </div>
 
-      <div className="flex flex-col md:flex-row items-center gap-6">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col items-center gap-5 sm:gap-6 md:flex-row">
+        <div className="flex w-full max-w-xs items-center justify-center gap-3 sm:gap-4">
           <button
             type="button"
             onClick={handlePrevious}
             disabled={isLoadingPlaylist || isBuffering || !canGoPrevious}
-            className="flex items-center justify-center w-14 h-14 rounded-full border border-zinc-700 text-zinc-300 hover:border-emerald-500 hover:text-emerald-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Previous track"
           >
             <SkipBack className="w-6 h-6" />
@@ -1151,7 +1159,7 @@ export default function LeafLockPlayer() {
             type="button"
             onClick={togglePlay}
             disabled={isLoadingPlaylist || (isBuffering && !isBlending)}
-            className="flex items-center justify-center w-20 h-20 md:w-24 md:h-24 rounded-full bg-white text-zinc-950 hover:bg-emerald-400 active:scale-[0.985] transition-all shadow-xl disabled:opacity-60 disabled:cursor-wait"
+            className="flex h-[4.5rem] w-[4.5rem] shrink-0 items-center justify-center rounded-full bg-white text-zinc-950 shadow-xl transition-all hover:bg-emerald-400 active:scale-[0.985] disabled:cursor-wait disabled:opacity-60 sm:h-20 sm:w-20 md:h-24 md:w-24 touch-manipulation"
             aria-label={isPlaying ? "Pause playlist" : "Play playlist"}
           >
             {isLoadingPlaylist || (isBuffering && !isBlending) ? (
@@ -1167,15 +1175,19 @@ export default function LeafLockPlayer() {
             type="button"
             onClick={handleNext}
             disabled={isLoadingPlaylist || isBlending}
-            className="flex items-center justify-center w-14 h-14 rounded-full border border-zinc-700 text-zinc-300 hover:border-emerald-500 hover:text-emerald-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Next track"
           >
             <SkipForward className="w-6 h-6" />
           </button>
         </div>
 
-        <div className="flex-1 w-full md:w-auto flex items-center gap-4">
-          <button onClick={toggleMute} className="text-zinc-400 hover:text-white transition-colors">
+        <div className="flex w-full items-center gap-3 sm:gap-4 md:flex-1 md:w-auto">
+          <button
+            onClick={toggleMute}
+            className="shrink-0 p-2 text-zinc-400 transition-colors hover:text-white touch-manipulation"
+            aria-label={isMuted || volume === 0 ? "Unmute" : "Mute"}
+          >
             {isMuted || volume === 0 ? <VolumeX size={22} /> : <Volume2 size={22} />}
           </button>
           <input
@@ -1185,20 +1197,20 @@ export default function LeafLockPlayer() {
             step="0.01"
             value={volume / 100}
             onChange={handleVolumeChange}
-            className="w-full accent-emerald-500"
+            className="h-10 w-full accent-emerald-500 sm:h-auto"
           />
         </div>
       </div>
 
-      <div className="mt-8 flex flex-col md:flex-row md:items-center justify-between gap-y-4 text-sm">
+      <div className="mt-6 flex flex-col justify-between gap-y-4 text-sm sm:mt-8 md:flex-row md:items-center">
         <div className="text-zinc-500">
           {playbackError ? (
             <span className="text-amber-400">{playbackError}</span>
           ) : isBlending ? (
-            "Smooth DJ mix — 15 second crossfade in progress"
+            "Smooth DJ mix — 5 second crossfade in progress"
           ) : isConnected && isPlaying ? (
             djBlendEnabled
-              ? "Smart DJ blend — longer crossfades and similar tracks"
+              ? "Smart DJ blend — 5 second crossfades between tracks"
               : "Shuffling playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
             "Loading YouTube playlist..."
@@ -1211,14 +1223,21 @@ export default function LeafLockPlayer() {
               background on iPhone.
             </span>
           ) : null}
-          <span className="mt-1 block truncate text-xs text-zinc-600">
-            {playlistCount > 0 && playlistId
-              ? `${playlistCount} tracks • https://www.youtube.com/playlist?list=${playlistId}`
-              : "Loading playlist..."}
+          <span className="mt-1 block text-xs text-zinc-600">
+            {playlistCount > 0 && playlistId ? (
+              <>
+                <span className="sm:hidden">{playlistCount} tracks loaded</span>
+                <span className="hidden truncate sm:block">
+                  {playlistCount} tracks • https://www.youtube.com/playlist?list={playlistId}
+                </span>
+              </>
+            ) : (
+              "Loading playlist..."
+            )}
           </span>
         </div>
 
-        <div className="flex gap-4 text-emerald-400">
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-emerald-400">
           <a href="/fm" className="hover:underline">
             Live FM
           </a>

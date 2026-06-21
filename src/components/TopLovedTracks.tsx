@@ -23,7 +23,7 @@ export default function TopLovedTracks() {
   if (tracks.length === 0) return null;
 
   return (
-    <div className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-5">
       <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.2em] text-pink-300">
         <Heart className="h-4 w-4 fill-pink-400 text-pink-400" />
         Most Loved
