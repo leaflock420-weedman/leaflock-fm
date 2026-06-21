@@ -1,12 +1,13 @@
 import InstallPrompt from "@/components/InstallPrompt";
 import FmDeskPanel from "@/components/FmDeskPanel";
+import FmPlaybackDock from "@/components/FmPlaybackDock";
 import TopLovedTracks from "@/components/TopLovedTracks";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import LeafLockStreamPlayer from "@/app/components/LeafLockStreamPlayer";
 
 export default function FMPage() {
   return (
-    <main className="min-h-[100dvh] bg-black px-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-6 sm:py-12 md:py-16">
+    <main className="min-h-[100dvh] bg-black px-4 pb-[max(6rem,env(safe-area-inset-bottom))] pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-6 sm:py-12 md:pb-16 md:py-16">
       <div className="mx-auto max-w-2xl space-y-8 sm:space-y-10">
         <section id="shuffle">
           <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.24em] text-emerald-500 sm:mb-4 sm:text-xs">
@@ -32,6 +33,7 @@ export default function FMPage() {
         Built for the culture. Powered by AzuraCast + YouTube.
       </div>
       <InstallPrompt />
+      <FmPlaybackDock />
       <FmDeskPanel />
     </main>
   );
