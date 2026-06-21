@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Disc3,
   Loader2,
@@ -182,19 +183,6 @@ function youtubeArtwork(videoId: string | null): MediaImage[] {
   ];
 }
 
-function publishPlaybackState(detail: {
-  visible: boolean;
-  title: string;
-  artist: string;
-  isPlaying: boolean;
-  isBuffering: boolean;
-  canGoPrevious: boolean;
-  isBlending: boolean;
-}) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("leaflock:playback-state", { detail }));
-}
-
 export default function LeafLockPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -221,7 +209,10 @@ export default function LeafLockPlayer() {
   const [duration, setDuration] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
+  const [controlsOffscreen, setControlsOffscreen] = useState(false);
+  const [portalReady, setPortalReady] = useState(false);
 
+  const controlsRef = useRef<HTMLDivElement | null>(null);
   const mediaBridgeRef = useRef<HTMLAudioElement | null>(null);
   const playersRef = useRef<Record<DeckId, YTPlayer | null>>({ a: null, b: null });
   const playersReadyRef = useRef<Record<DeckId, boolean>>({ a: false, b: false });
@@ -1095,48 +1086,23 @@ export default function LeafLockPlayer() {
   }, [isPlaying, syncMediaBridge]);
 
   useEffect(() => {
-    const onPrev = () => {
-      playPreviousRef.current();
-    };
-    const onNext = () => {
-      playNextRef.current();
-    };
-    const onToggle = () => {
-      togglePlayRef.current();
-    };
-
-    window.addEventListener("leaflock:playback-prev", onPrev);
-    window.addEventListener("leaflock:playback-next", onNext);
-    window.addEventListener("leaflock:playback-toggle", onToggle);
-
-    return () => {
-      window.removeEventListener("leaflock:playback-prev", onPrev);
-      window.removeEventListener("leaflock:playback-next", onNext);
-      window.removeEventListener("leaflock:playback-toggle", onToggle);
-    };
+    setPortalReady(true);
   }, []);
 
   useEffect(() => {
-    publishPlaybackState({
-      visible: isMobile && (isPlaying || isConnected) && !isLoadingPlaylist,
-      title: nowPlaying.title,
-      artist: nowPlaying.artist,
-      isPlaying,
-      isBuffering,
-      canGoPrevious,
-      isBlending
-    });
-  }, [
-    canGoPrevious,
-    isBlending,
-    isBuffering,
-    isConnected,
-    isLoadingPlaylist,
-    isMobile,
-    isPlaying,
-    nowPlaying.artist,
-    nowPlaying.title
-  ]);
+    const node = controlsRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setControlsOffscreen(!entry.isIntersecting);
+      },
+      { threshold: 0, rootMargin: "0px 0px 0px 0px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   const toggleDjBlend = () => {
     setDjBlendEnabled((current) => {
@@ -1203,7 +1169,65 @@ export default function LeafLockPlayer() {
     setIsSeeking(false);
   };
 
+  const showMiniDock =
+    controlsOffscreen && (isPlaying || isConnected) && !isLoadingPlaylist;
+
+  const miniDock =
+    portalReady && showMiniDock
+      ? createPortal(
+          <div
+            className="fixed inset-x-0 bottom-0 z-[100] hidden border-t border-emerald-500/30 bg-zinc-950 px-4 pb-[max(0.85rem,env(safe-area-inset-bottom))] pt-3 shadow-[0_-16px_48px_rgba(0,0,0,0.6)] backdrop-blur-lg max-md:block"
+            role="region"
+            aria-label="Mini playback controls"
+          >
+            <div className="mx-auto flex max-w-2xl items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-white">{nowPlaying.title}</p>
+                <p className="truncate text-xs text-zinc-400">{nowPlaying.artist}</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={handlePrevious}
+                  disabled={isBuffering || !canGoPrevious}
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900 text-zinc-200 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-35 touch-manipulation"
+                  aria-label="Previous track"
+                >
+                  <SkipBack className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={togglePlay}
+                  disabled={isBuffering && !isBlending}
+                  className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500 text-zinc-950 shadow-lg transition-all hover:bg-emerald-400 active:scale-[0.98] disabled:opacity-60 touch-manipulation"
+                  aria-label={isPlaying ? "Pause" : "Play"}
+                >
+                  {isBuffering && !isBlending ? (
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                  ) : isPlaying ? (
+                    <Pause className="h-6 w-6" />
+                  ) : (
+                    <Play className="h-6 w-6 ml-0.5" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  disabled={isBlending}
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900 text-zinc-200 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-35 touch-manipulation"
+                  aria-label="Next track"
+                >
+                  <SkipForward className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
+
   return (
+    <>
     <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
       <div className="mb-5 flex flex-col gap-4 sm:mb-6">
         <LeafLockLogo
@@ -1303,7 +1327,10 @@ export default function LeafLockPlayer() {
       </div>
 
       <div className="flex flex-col items-center gap-5 sm:gap-6 md:flex-row">
-        <div className="flex w-full max-w-xs items-center justify-center gap-3 sm:gap-4">
+        <div
+          ref={controlsRef}
+          className="flex w-full max-w-xs items-center justify-center gap-3 sm:gap-4"
+        >
           <button
             type="button"
             onClick={handlePrevious}
@@ -1444,5 +1471,7 @@ export default function LeafLockPlayer() {
         }}
       />
     </div>
+    {miniDock}
+    </>
   );
 }

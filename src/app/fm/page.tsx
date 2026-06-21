@@ -1,6 +1,6 @@
 import InstallPrompt from "@/components/InstallPrompt";
 import FmDeskPanel from "@/components/FmDeskPanel";
-import FmPlaybackDock from "@/components/FmPlaybackDock";
+
 import TopLovedTracks from "@/components/TopLovedTracks";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import LeafLockStreamPlayer from "@/app/components/LeafLockStreamPlayer";
@@ -33,7 +33,7 @@ export default function FMPage() {
         Built for the culture. Powered by AzuraCast + YouTube.
       </div>
       <InstallPrompt />
-      <FmPlaybackDock />
+
       <FmDeskPanel />
     </main>
   );
