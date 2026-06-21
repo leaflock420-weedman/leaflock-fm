@@ -24,7 +24,7 @@ export default function LeafLockLogo({ className = "", onSecretTap }: LeafLockLo
     window.setTimeout(() => setTapCount(0), 900);
   }
 
-  const src = useFallback ? "/icon" : "/leaflock-logo.jpg";
+  const src = useFallback ? "/icon" : "/leaflock-logo.png";
 
   return (
     <button
@@ -38,7 +38,7 @@ export default function LeafLockLogo({ className = "", onSecretTap }: LeafLockLo
         alt="LeafLock"
         width={680}
         height={120}
-        className="h-auto w-full object-contain object-left"
+        className={`h-auto w-full bg-transparent object-contain object-left ${useFallback ? "" : "[mix-blend-mode:normal]"}`}
         onError={() => setUseFallback(true)}
         priority
       />
