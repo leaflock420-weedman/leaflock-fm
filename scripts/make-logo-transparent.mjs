@@ -1,10 +1,18 @@
 import sharp from "sharp";
+import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const input = path.join(root, "public", "leaflock-logo.jpg");
 const output = path.join(root, "public", "leaflock-logo.png");
+
+try {
+  await fs.access(input);
+} catch {
+  console.log("No leaflock-logo.jpg found — keeping existing PNG if present.");
+  process.exit(0);
+}
 
 const { data, info } = await sharp(input).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
