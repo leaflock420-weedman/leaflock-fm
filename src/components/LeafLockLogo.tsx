@@ -30,7 +30,7 @@ export default function LeafLockLogo({ className = "", onSecretTap }: LeafLockLo
     <button
       type="button"
       onClick={handleTap}
-      className={`relative block w-full max-w-[280px] sm:max-w-[340px] ${onSecretTap ? "cursor-pointer" : "cursor-default"} ${className}`}
+      className={`relative block w-full max-w-[280px] border-0 bg-transparent p-0 shadow-none outline-none sm:max-w-[340px] ${onSecretTap ? "cursor-pointer" : "cursor-default"} ${className}`}
       aria-label="LeafLock FM"
     >
       <Image
