@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>LeafLock Radio</title>
+    <link>https://leaflock.example</link>
+    <language>en-au</language>
+    <description>Live radio replays, flagship episodes, interviews, and community dispatches from LeafLock Radio.</description>
+    <itunes:author>LeafLock Radio</itunes:author>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:image href="https://leaflock.example/artwork/podcast-cover.jpg" />
+    <itunes:category text="Music" />
+    <item>
+      <title>Field Notes 018: Building a scene that lasts</title>
+      <description>A practical conversation about venues, community submissions, sponsor trust, and local discovery.</description>
+      <pubDate>Sat, 18 Apr 2026 08:00:00 +1000</pubDate>
+      <guid isPermaLink="false">leaflock-field-notes-018</guid>
+      <itunes:duration>54:12</itunes:duration>
+      <itunes:explicit>false</itunes:explicit>
+      <enclosure url="https://leaflock.example/media/field-notes-018.m4a" length="0" type="audio/mp4" />
+    </item>
+  </channel>
+</rss>

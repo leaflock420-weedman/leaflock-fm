@@ -1,0 +1,8 @@
+# Replace TUNNEL_ID with output of: cloudflared tunnel create leaflock-fm
+tunnel: TUNNEL_ID
+credentials-file: C:\Users\wordo\.cloudflared\TUNNEL_ID.json
+
+ingress:
+  - hostname: fm.leaflock.com.au
+    service: http://localhost:3000
+  - service: http_status:404

@@ -1,0 +1,173 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LeafLock Radio</title>
+    <meta name="description" content="LeafLock Radio is a 24/7 online radio and podcast platform with live streaming, shows, episodes, clips, schedules, and publishing workflows.">
+    <meta property="og:title" content="LeafLock Radio">
+    <meta property="og:description" content="24/7 radio, podcasts, clips, live shows, and platform publishing workflows.">
+    <meta property="og:type" content="website">
+    <meta name="theme-color" content="#f6fbf2">
+    <link rel="stylesheet" href="styles.css">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "RadioStation",
+        "name": "LeafLock Radio",
+        "url": "https://leaflock.example",
+        "broadcastDisplayName": "LeafLock Radio",
+        "sameAs": ["https://www.youtube.com/", "https://open.spotify.com/", "https://podcasts.apple.com/"]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#home" aria-label="LeafLock Radio home">
+        <span class="brand-mark">LLR</span>
+        <span>LeafLock Radio</span>
+      </a>
+      <nav class="nav" aria-label="Main navigation">
+        <a href="#listen">Listen</a>
+        <a href="#shows">Shows</a>
+        <a href="#episodes">Episodes</a>
+        <a href="#schedule">Schedule</a>
+        <a href="#clips">Clips</a>
+        <a href="#admin">Admin</a>
+      </nav>
+    </header>
+
+    <main id="home">
+      <section id="listen" class="live-section">
+        <div class="live-copy">
+          <p class="eyebrow">24/7 AutoDJ and live takeovers</p>
+          <h1>Stay locked on the culture, all day.</h1>
+          <p>Live radio, weekly shows, podcast drops, video episodes, and clips from one publishing desk. Built around AzuraCast for the radio engine and RSS-first podcast distribution.</p>
+          <div class="live-actions">
+            <button class="primary-button" id="shareStation" type="button">Share Station</button>
+            <a class="secondary-button" href="#admin">Open Admin</a>
+          </div>
+          <div class="subscribe-row" aria-label="Subscribe links">
+            <a href="#platforms">YouTube</a>
+            <a href="#platforms">Spotify</a>
+            <a href="#platforms">Apple Podcasts</a>
+            <a href="#platforms">RSS</a>
+          </div>
+        </div>
+
+        <aside class="player-shell" aria-label="Live radio player">
+          <img class="cover-art" src="https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1000&q=80" alt="Crowd at a live music event">
+          <div class="player-content">
+            <p class="status-pill"><span class="pulse-dot"></span> Live now</p>
+            <h2 id="nowPlayingTitle">Morning Canopy</h2>
+            <p id="nowPlayingMeta">Nia Vale - interviews, sponsor spots, IDs, and new releases</p>
+            <audio id="radioPlayer" controls preload="none" src="https://stream.live.vc.bbcmedia.co.uk/bbc_radio_one"></audio>
+            <div class="player-actions">
+              <label>Volume <input id="volumeControl" type="range" min="0" max="1" step="0.01" value="0.85"></label>
+              <button class="mini-button" id="fallbackPlayer" type="button">Try Fallback</button>
+            </div>
+            <p class="stream-note" id="streamNote">Demo stream loaded. Replace it with the AzuraCast public mount when your station is ready.</p>
+          </div>
+        </aside>
+      </section>
+
+      <section class="status-row" aria-label="Station status">
+        <div><strong id="liveStatus">On air</strong><span>fallback AutoDJ ready</span></div>
+        <div><strong id="listenerCount">128</strong><span>current listeners</span></div>
+        <div><strong id="nextShow">Green Room</strong><span>next show at 14:00 AEST</span></div>
+        <div><strong>RSS-ready</strong><span>Apple and Spotify checklist</span></div>
+      </section>
+
+      <section class="section-block split-band">
+        <div class="section-heading">
+          <p class="eyebrow">Featured episode</p>
+          <h2>Field Notes 018: Building a scene that lasts</h2>
+          <p>A flagship studio conversation with chapter markers, transcript support, podcast metadata, YouTube embed space, related clips, and platform links.</p>
+          <a class="secondary-button" href="#episodes">View Episode</a>
+        </div>
+        <div class="chat-panel" aria-label="Live chat module">
+          <div class="panel-title"><h3>Live Chat</h3><span class="label live">Broadcasting</span></div>
+          <ul id="chatList" class="chat-list"></ul>
+          <form id="chatForm" class="chat-form">
+            <label class="sr-only" for="chatMessage">Chat message</label>
+            <input id="chatMessage" type="text" maxlength="120" placeholder="Send a shoutout">
+            <button class="mini-button" type="submit">Send</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="shows" class="section-block">
+        <div class="section-heading"><p class="eyebrow">Shows</p><h2>Recurring programming</h2><p>Every show includes hosts, tags, scheduled slots, latest episodes, latest clips, and preferred platforms.</p></div>
+        <div class="card-grid" id="showGrid"></div>
+      </section>
+
+      <section id="episodes" class="section-block alt-band">
+        <div class="section-heading"><p class="eyebrow">Episodes</p><h2>Podcast and video archive</h2><p>Episode pages support audio, video embeds, transcripts, chapters, guests, platform links, and related clips.</p></div>
+        <div class="feature-list" id="episodeList"></div>
+      </section>
+
+      <section id="schedule" class="section-block">
+        <div class="section-heading"><p class="eyebrow">Schedule</p><h2>Timezone-aware station clock</h2><p>Hard show blocks sit on top of AutoDJ, sponsor inserts, legal IDs, late-night chill, replays, and emergency filler.</p></div>
+        <div class="toolbar" role="group" aria-label="Schedule view controls">
+          <button class="mini-button is-active" data-schedule-view="daily" type="button">Daily</button>
+          <button class="mini-button" data-schedule-view="weekly" type="button">Weekly</button>
+        </div>
+        <div class="schedule-grid" id="scheduleGrid" aria-live="polite"></div>
+      </section>
+
+      <section id="clips" class="section-block split-band">
+        <div><p class="eyebrow">Clips</p><h2>Shorts, highlights, and social drafts</h2><p>One master recording can produce a live replay, podcast audio, YouTube upload, transcript, waveform, thumbnail, and clip queue for approval.</p></div>
+        <div class="clip-grid" id="clipGrid"></div>
+      </section>
+
+      <section id="admin" class="section-block admin-section">
+        <div class="section-heading"><p class="eyebrow">Admin dashboard</p><h2>Run the station desk</h2><p>Monitor stream health, uploads, approvals, scheduled content, analytics, audit events, and failed jobs.</p></div>
+        <div class="dashboard-grid">
+          <article class="metric-card"><span>Stream health</span><strong>Healthy</strong><p>AzuraCast mount reachable, AutoDJ has eligible fallback media.</p></article>
+          <article class="metric-card"><span>Failed uploads</span><strong id="failedUploads">2</strong><p>Retry queue is waiting for producer review.</p></article>
+          <article class="metric-card"><span>Pending approvals</span><strong id="pendingApprovals">6</strong><p>Clips, sponsor reads, and episode metadata are queued.</p></article>
+          <article class="metric-card"><span>Avg session</span><strong>36m</strong><p>Listener analytics roll up from stream and platform reports.</p></article>
+        </div>
+        <div class="studio-layout">
+          <form class="studio-panel" id="contentForm">
+            <h3>Create content item</h3>
+            <label>Content type <select id="contentType" name="contentType"><option>Episode</option><option>Clip</option><option>Show</option><option>Blog / News</option><option>Sponsor Spot</option><option>Playlist Block</option></select></label>
+            <label>Title <input id="contentTitle" name="contentTitle" type="text" placeholder="Field Notes 019"></label>
+            <label>Owner <input id="contentOwner" name="contentOwner" type="text" placeholder="Producer, host, or sponsor manager"></label>
+            <label>Publishing state <select id="contentState" name="contentState"><option>Draft</option><option>Ready for Review</option><option>Approved</option><option>Scheduled</option><option>Published</option><option>Archived</option><option>Failed</option></select></label>
+            <label>Master recording <input id="masterRecording" name="masterRecording" type="file" accept="audio/*,video/*"></label>
+            <label>Notes <textarea id="contentNotes" name="contentNotes" rows="4" placeholder="Transcript, clips, RSS, YouTube, replay radio"></textarea></label>
+            <button class="primary-button" type="submit">Add to Workflow</button>
+            <p class="form-note">This static build stores workflow items in your browser. The production app should write to PostgreSQL and queue worker jobs in Redis.</p>
+          </form>
+          <div class="queue-panel">
+            <div class="panel-title"><h3>Publishing workflow</h3><button class="text-button" id="clearWorkflow" type="button">Clear</button></div>
+            <ul class="queue-list" id="workflowList" aria-live="polite"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="platforms" class="section-block">
+        <div class="section-heading"><p class="eyebrow">Integrations</p><h2>Radio, podcast, and video distribution</h2><p>AzuraCast handles 24/7 radio. RSS is the source of truth for podcast distribution. YouTube is the video platform.</p></div>
+        <div class="platform-grid" id="platformGrid"></div>
+      </section>
+
+      <section id="contact" class="ops-section">
+        <img src="https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=1000&q=80" alt="Singer performing on a lit stage">
+        <div>
+          <p class="eyebrow">Submit / Contact</p>
+          <h2>Send music, sponsor ideas, guest pitches, and community submissions</h2>
+          <form class="contact-form" id="contactForm">
+            <label>Name <input name="name" type="text" placeholder="Your name"></label>
+            <label>Email <input name="email" type="email" placeholder="you@example.com"></label>
+            <label>Pitch <textarea name="pitch" rows="4" placeholder="Tell us what you want to submit"></textarea></label>
+            <button class="primary-button" type="submit">Prepare Email</button>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer"><span>LeafLock Radio</span><span>Public site, live player, publishing workflow, and AzuraCast-ready integration plan.</span></footer>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,56 @@
+﻿{
+  "station": {
+    "name": "LeafLock Radio",
+    "publicUrl": "https://leaflock.example",
+    "timezone": "Australia/Brisbane",
+    "primaryStreamUrl": "https://azuracast.example/listen/leaflock_radio/radio.mp3",
+    "fallbackStreamUrl": "https://azuracast.example/listen/leaflock_radio/reruns.mp3",
+    "mounts": ["radio", "lofi", "reruns", "live-events"]
+  },
+  "azuracast": {
+    "enabled": false,
+    "baseUrl": "https://azuracast.example",
+    "stationShortName": "leaflock_radio",
+    "requires": ["API key", "station id", "public stream mount", "DJ accounts", "scheduled playlists"]
+  },
+  "database": {
+    "provider": "postgresql",
+    "requires": ["shows", "episodes", "hosts", "clips", "schedule_blocks", "publishing_jobs", "audit_logs", "analytics_snapshots"]
+  },
+  "queue": {
+    "provider": "redis",
+    "jobs": ["normalize_audio", "generate_waveform", "generate_transcript", "extract_clips", "generate_thumbnail", "regenerate_rss", "publish_youtube", "pull_analytics"]
+  },
+  "storage": {
+    "provider": "s3-compatible",
+    "bucket": "leaflock-media",
+    "maxFileSizeMb": 5000,
+    "allowedTypes": ["audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "video/mp4", "image/jpeg", "image/png", "text/vtt"]
+  },
+  "podcast": {
+    "rssUrl": "https://leaflock.example/rss.xml",
+    "requires": ["valid RSS feed", "at least one published episode", "show artwork", "episode enclosure", "title", "description", "language", "category", "explicit flag"]
+  },
+  "youtube": {
+    "enabled": false,
+    "channelId": "",
+    "requires": ["Google Cloud project", "YouTube Data API", "OAuth consent", "upload scopes", "live streaming enabled channel"]
+  },
+  "spotify": {
+    "enabled": false,
+    "showId": "",
+    "requires": ["Spotify for Creators account", "RSS distribution settings", "show ownership validation"]
+  },
+  "applePodcasts": {
+    "enabled": false,
+    "requires": ["Apple Podcasts Connect", "RSS validation", "podcast artwork", "compliant episode media"]
+  },
+  "roles": ["Super Admin", "Producer", "Host", "Editor", "DJ / Streamer", "Sponsor Manager", "Analytics Viewer"],
+  "publishingStates": ["Draft", "Ready for Review", "Approved", "Scheduled", "Published", "Archived", "Failed"],
+  "compliance": {
+    "musicLicensing": "Confirm before public launch",
+    "privacyPolicyUrl": "",
+    "termsUrl": "",
+    "contactEmail": "radio@example.com"
+  }
+}
