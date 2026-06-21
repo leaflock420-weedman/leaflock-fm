@@ -1,9 +1,6 @@
-import { getFmSettings } from "@/lib/fm-store";
+import { getFmPublicConfig } from "@/lib/fm-store";
 
 export async function GET() {
-  const settings = await getFmSettings();
-  return Response.json({
-    playlistId: settings.playlistId,
-    updatedAt: settings.updatedAt
-  });
+  const config = await getFmPublicConfig();
+  return Response.json(config);
 }

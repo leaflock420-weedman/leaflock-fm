@@ -1,3 +1,4 @@
+import { emailTrackLove } from "@/lib/fm-email";
 import { getTopLikes, recordTrackLike } from "@/lib/fm-store";
 
 export async function GET(request: Request) {
@@ -24,6 +25,10 @@ export async function POST(request: Request) {
     artist: body.artist?.trim(),
     source: body.source === "stream" ? "stream" : "playlist"
   });
+
+  if (process.env.FM_EMAIL_ON_LIKE === "true") {
+    void emailTrackLove(like);
+  }
 
   return Response.json({ like });
 }

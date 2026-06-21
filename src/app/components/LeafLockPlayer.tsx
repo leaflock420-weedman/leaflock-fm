@@ -23,6 +23,7 @@ import {
   runDjCrossfade,
   shouldStartBlend
 } from "@/lib/dj-blend";
+import { pickPlaylistId, type FmPlayerMode } from "@/lib/fm-player-config";
 import {
   pickUpcomingTrack,
   savePlayHistory,
@@ -183,7 +184,18 @@ function youtubeArtwork(videoId: string | null): MediaImage[] {
   ];
 }
 
-export default function LeafLockPlayer() {
+type LeafLockPlayerProps = {
+  /** simple = main song playlist only, no schedule switching */
+  mode?: FmPlayerMode;
+  subtitle?: string;
+  hideLogo?: boolean;
+};
+
+export default function LeafLockPlayer({
+  mode = "simple",
+  subtitle,
+  hideLogo = false
+}: LeafLockPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(85);
@@ -742,8 +754,19 @@ export default function LeafLockPlayer() {
     async function bootstrap() {
       try {
         const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
-        const config = (await configResponse.json()) as { playlistId?: string };
-        const activePlaylistId = config.playlistId;
+        const config = (await configResponse.json()) as {
+          playlistId?: string;
+          simplePlaylistId?: string;
+          playlists?: Partial<Record<FmPlayerMode, string>>;
+        };
+        const activePlaylistId = pickPlaylistId(
+          {
+            playlistId: config.playlistId ?? "",
+            simplePlaylistId: config.simplePlaylistId ?? config.playlistId ?? "",
+            playlists: config.playlists ?? {}
+          },
+          mode
+        );
 
         if (!activePlaylistId) {
           throw new Error("Playlist is not configured");
@@ -789,7 +812,7 @@ export default function LeafLockPlayer() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [mode]);
 
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
@@ -1230,10 +1253,12 @@ export default function LeafLockPlayer() {
     <>
     <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
       <div className="mb-5 flex flex-col gap-4 sm:mb-6">
-        <LeafLockLogo
-          className="mx-auto sm:mx-0"
-          onSecretTap={() => window.dispatchEvent(new Event("leaflock:open-desk"))}
-        />
+        {hideLogo ? null : (
+          <LeafLockLogo
+            className="mx-auto sm:mx-0"
+            onSecretTap={() => window.dispatchEvent(new Event("leaflock:open-desk"))}
+          />
+        )}
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 text-center sm:text-left">
@@ -1253,7 +1278,7 @@ export default function LeafLockPlayer() {
               </span>
             </div>
             <h1 className="mt-1 text-xl font-semibold tracking-tight text-white sm:text-3xl">FM 104.2</h1>
-            <p className="mt-0.5 text-sm text-zinc-400">Stay Locked</p>
+            <p className="mt-0.5 text-sm text-zinc-400">{subtitle ?? "Stay Locked"}</p>
           </div>
 
         <button

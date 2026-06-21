@@ -30,14 +30,14 @@ export default function LeafLockLogo({ className = "", onSecretTap }: LeafLockLo
     <button
       type="button"
       onClick={handleTap}
-      className={`relative block w-full max-w-[280px] border-0 bg-transparent p-0 shadow-none outline-none sm:max-w-[340px] ${onSecretTap ? "cursor-pointer" : "cursor-default"} ${className}`}
-      aria-label="LeafLock FM"
+      className={`relative block w-full max-w-[280px] border-0 bg-transparent p-0 shadow-none outline-none sm:max-w-[320px] ${onSecretTap ? "cursor-pointer" : "cursor-default"} ${className}`}
+      aria-label="Leaf Lock Locked In Radio"
     >
       <Image
         src={src}
-        alt="LeafLock"
+        alt="Leaf Lock Locked In Radio"
         width={680}
-        height={120}
+        height={280}
         className="h-auto w-full bg-transparent object-contain object-left"
         onError={() => setUseFallback(true)}
         priority

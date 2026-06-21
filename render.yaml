@@ -27,3 +27,9 @@ services:
         value: AIzaSyD4f1Oc6R9xC58TSiS99BvayekV29rZO2A
       - key: FM_ADMIN_SECRET
         value: leaflock-fm-desk-2026
+      - key: FM_OWNER_EMAIL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FM_EMAIL_ON_LIKE
+        value: "false"
