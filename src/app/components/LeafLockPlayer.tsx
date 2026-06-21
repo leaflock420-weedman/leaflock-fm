@@ -159,6 +159,23 @@ function formatPlaybackTime(seconds: number): string {
   return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+function youtubeArtwork(videoId: string | null): MediaImage[] {
+  const fallback = "/leaflock-logo.png";
+  if (!videoId) {
+    return [
+      { src: fallback, sizes: "512x512", type: "image/png" },
+      { src: fallback, sizes: "256x256", type: "image/png" }
+    ];
+  }
+
+  const thumb = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  return [
+    { src: thumb, sizes: "480x360", type: "image/jpeg" },
+    { src: thumb, sizes: "320x180", type: "image/jpeg" },
+    { src: fallback, sizes: "512x512", type: "image/png" }
+  ];
+}
+
 export default function LeafLockPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -185,7 +202,9 @@ export default function LeafLockPlayer() {
   const [duration, setDuration] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
+  const [showMiniPlayer, setShowMiniPlayer] = useState(false);
 
+  const playerCardRef = useRef<HTMLDivElement | null>(null);
   const playersRef = useRef<Record<DeckId, YTPlayer | null>>({ a: null, b: null });
   const playersReadyRef = useRef<Record<DeckId, boolean>>({ a: false, b: false });
   const playerInitRef = useRef(false);
@@ -247,6 +266,26 @@ export default function LeafLockPlayer() {
     setNowPlaying({ title: video.title, artist });
   }, []);
 
+  const syncMediaSessionPosition = useCallback((time: number, total: number) => {
+    if (!("mediaSession" in navigator) || !("setPositionState" in navigator.mediaSession)) {
+      return;
+    }
+
+    if (!Number.isFinite(total) || total <= 0) {
+      return;
+    }
+
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: total,
+        playbackRate: 1,
+        position: Math.min(Math.max(0, time), total)
+      });
+    } catch {
+      // Position state is optional on some browsers.
+    }
+  }, []);
+
   const syncPlaybackProgress = useCallback(() => {
     const player = getActivePlayer();
     if (!player || !currentVideoIdRef.current || blendInProgressRef.current || isSeekingRef.current) {
@@ -267,10 +306,14 @@ export default function LeafLockPlayer() {
       if (Number.isFinite(total) && total > 0) {
         setDuration(total);
       }
+
+      if (Number.isFinite(time) && Number.isFinite(total) && total > 0) {
+        syncMediaSessionPosition(time, total);
+      }
     } catch {
       // Player may not expose timing yet.
     }
-  }, [getActivePlayer, getCurrentSessionTrack]);
+  }, [getActivePlayer, getCurrentSessionTrack, syncMediaSessionPosition]);
 
   const updateNowPlayingFromActiveDeck = useCallback(() => {
     const player = getActivePlayer();
@@ -723,6 +766,7 @@ export default function LeafLockPlayer() {
   const togglePlayRef = useRef<() => void>(() => {});
   const handlePreviousRef = useRef<() => void>(() => {});
   const handleNextRef = useRef<() => void>(() => {});
+  const bindMediaSessionRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!playlistReady || playerInitRef.current) return;
@@ -757,6 +801,7 @@ export default function LeafLockPlayer() {
                 setIsConnected(true);
                 setIsBuffering(false);
                 setPlaybackError(null);
+                bindMediaSessionRef.current();
                 if (deck === activeDeckRef.current) {
                   updateNowPlayingRef.current();
                   syncPlaybackProgressRef.current();
@@ -952,6 +997,12 @@ export default function LeafLockPlayer() {
     navigator.mediaSession.setActionHandler("nexttrack", () => {
       handleNextRef.current();
     });
+    navigator.mediaSession.setActionHandler("seekbackward", () => {
+      handlePreviousRef.current();
+    });
+    navigator.mediaSession.setActionHandler("seekforward", () => {
+      handleNextRef.current();
+    });
   }, [getActivePlayer, stopTimePolling]);
 
   const updateMediaSession = useCallback(
@@ -961,11 +1012,23 @@ export default function LeafLockPlayer() {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: nowPlaying.title,
         artist: nowPlaying.artist,
-        album: djBlendEnabled ? "LeafLock FM DJ Blend" : "LeafLock FM Shuffle"
+        album: djBlendEnabled ? "LeafLock FM DJ Blend" : "LeafLock FM Shuffle",
+        artwork: youtubeArtwork(currentVideoIdRef.current)
       });
       navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+
+      if (playing && duration > 0) {
+        syncMediaSessionPosition(currentTime, duration);
+      }
     },
-    [djBlendEnabled, nowPlaying.artist, nowPlaying.title]
+    [
+      currentTime,
+      djBlendEnabled,
+      duration,
+      nowPlaying.artist,
+      nowPlaying.title,
+      syncMediaSessionPosition
+    ]
   );
 
   useEffect(() => {
@@ -975,9 +1038,28 @@ export default function LeafLockPlayer() {
   });
 
   useEffect(() => {
+    bindMediaSessionRef.current = bindMediaSession;
+  }, [bindMediaSession]);
+
+  useEffect(() => {
     bindMediaSession();
     updateMediaSession(isPlaying);
-  }, [bindMediaSession, isPlaying, updateMediaSession]);
+  }, [bindMediaSession, isPlaying, nowPlaying, updateMediaSession]);
+
+  useEffect(() => {
+    const node = playerCardRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setShowMiniPlayer(!entry.isIntersecting);
+      },
+      { threshold: 0.15, rootMargin: "-8px 0px 0px 0px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   const toggleDjBlend = () => {
     setDjBlendEnabled((current) => {
@@ -1044,8 +1126,14 @@ export default function LeafLockPlayer() {
     setIsSeeking(false);
   };
 
+  const miniPlayerVisible = showMiniPlayer && (isPlaying || isConnected) && !isLoadingPlaylist;
+
   return (
-    <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
+    <>
+    <div
+      ref={playerCardRef}
+      className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10"
+    >
       <div className="mb-5 flex flex-col gap-4 sm:mb-6">
         <LeafLockLogo
           className="mx-auto sm:mx-0"
@@ -1271,5 +1359,56 @@ export default function LeafLockPlayer() {
         <div ref={playerHostBRef} className="h-[2px] w-[2px]" />
       </div>
     </div>
+
+    {miniPlayerVisible ? (
+      <div
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-800/90 bg-zinc-950/95 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 shadow-[0_-12px_40px_rgba(0,0,0,0.45)] backdrop-blur-md sm:hidden"
+        role="region"
+        aria-label="Now playing controls"
+      >
+        <div className="mx-auto flex max-w-2xl items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-white">{nowPlaying.title}</p>
+            <p className="truncate text-xs text-zinc-400">{nowPlaying.artist}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={handlePrevious}
+              disabled={isBuffering || !canGoPrevious}
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-40 touch-manipulation"
+              aria-label="Previous track"
+            >
+              <SkipBack className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={togglePlay}
+              disabled={isBuffering && !isBlending}
+              className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-zinc-950 shadow-lg transition-all hover:bg-emerald-400 active:scale-[0.98] disabled:opacity-60 touch-manipulation"
+              aria-label={isPlaying ? "Pause playlist" : "Play playlist"}
+            >
+              {isBuffering && !isBlending ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : isPlaying ? (
+                <Pause className="h-6 w-6" />
+              ) : (
+                <Play className="h-6 w-6 ml-0.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleNext}
+              disabled={isBlending}
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-40 touch-manipulation"
+              aria-label="Next track"
+            >
+              <SkipForward className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }
