@@ -3,16 +3,14 @@ services:
     name: leaflock-fm
     runtime: node
     plan: free
-    buildCommand: npm ci --include=dev && npx prisma generate && npm run build
-    startCommand: node .next/standalone/server.js
-    healthCheckPath: /fm
+    buildCommand: npm install && npm run build && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/ && mkdir -p .next/standalone/data && cp -r data/* .next/standalone/data/ 2>/dev/null || true
+    startCommand: cd .next/standalone && node server.js
+    healthCheckPath: /
     envVars:
       - key: NODE_ENV
         value: production
       - key: HOSTNAME
         value: 0.0.0.0
-      - key: PORT
-        value: "10000"
       - key: DATABASE_URL
         value: postgresql://build:build@localhost:5432/build
       - key: APP_URL
