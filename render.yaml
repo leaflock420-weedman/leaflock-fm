@@ -3,8 +3,8 @@ services:
     name: leaflock-fm
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/ && mkdir -p .next/standalone/data && cp -r data/* .next/standalone/data/ 2>/dev/null || true
-    startCommand: cd .next/standalone && node server.js
+    buildCommand: npm install && npm run build
+    startCommand: npm start
     healthCheckPath: /
     envVars:
       - key: NODE_ENV
