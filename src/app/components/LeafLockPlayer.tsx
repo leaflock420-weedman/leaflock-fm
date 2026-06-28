@@ -321,12 +321,6 @@ export default function LeafLockPlayer({
     return next;
   }, [peekNextInRotation]);
 
-  const isInPlaylist = useCallback((videoId: string | null | undefined) => {
-    if (!videoId) return false;
-    if (outsidePlaylistAllowedRef.current === videoId) return true;
-    return playlistSetRef.current.has(videoId);
-  }, []);
-
   const acknowledgeInject = useCallback((inject: PlayerInject) => {
     void fetch("/api/fm/player-inject", {
       method: "POST",
