@@ -27,6 +27,7 @@ import {
 import { pickPlaylistId, type FmPlayerMode } from "@/lib/fm-player-config";
 import {
   createShuffledRotation,
+  pickVibeMatchFromPlaylist,
   savePlayHistory,
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
@@ -36,6 +37,12 @@ type PlayerInject = {
   id: string;
   videoId: string;
   title: string;
+  instagram?: string;
+};
+
+type RequestFlowContext = {
+  anchorVideo: PlaylistVideo;
+  vibeSongsRemaining: number;
 };
 
 type DeckId = "a" | "b";
@@ -241,6 +248,7 @@ export default function LeafLockPlayer({
   const [portalReady, setPortalReady] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
   const [activeDeck, setActiveDeck] = useState<DeckId>("a");
+  const [requestCredit, setRequestCredit] = useState<string | null>(null);
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const videoShellRef = useRef<HTMLDivElement | null>(null);
@@ -270,6 +278,7 @@ export default function LeafLockPlayer({
   const rotationIndexRef = useRef(-1);
   const prefetchedNextRef = useRef<PlaylistVideo | null>(null);
   const pendingInjectRef = useRef<PlayerInject | null>(null);
+  const requestFlowRef = useRef<RequestFlowContext | null>(null);
   const outsidePlaylistAllowedRef = useRef<string | null>(null);
 
   const syncPreviousState = useCallback(() => {
@@ -338,31 +347,83 @@ export default function LeafLockPlayer({
     };
   }, []);
 
-  const takeInjectTrack = useCallback((): PlaylistVideo | null => {
+  const formatRequestCredit = useCallback((inject: PlayerInject) => {
+    if (inject.source !== "jukebox") return null;
+    if (inject.instagram?.trim()) {
+      return `@${inject.instagram.trim().replace(/^@/, "")}`;
+    }
+    return "a listener";
+  }, []);
+
+  const peekNextScheduledTrack = useCallback((): PlaylistVideo | null => {
     const inject = pendingInjectRef.current;
-    if (!inject) return null;
-    pendingInjectRef.current = null;
-    acknowledgeInject(inject);
-    return injectToVideo(inject);
-  }, [acknowledgeInject, injectToVideo]);
+    if (inject) {
+      return injectToVideo(inject);
+    }
+
+    if (requestFlowRef.current?.vibeSongsRemaining) {
+      return pickVibeMatchFromPlaylist(
+        playlistRef.current,
+        requestFlowRef.current.anchorVideo
+      );
+    }
+
+    return peekNextInRotation();
+  }, [injectToVideo, peekNextInRotation]);
 
   const resolveNextTrack = useCallback((): PlaylistVideo | null => {
-    const injectTrack = takeInjectTrack();
-    if (injectTrack) return injectTrack;
+    const inject = pendingInjectRef.current;
+    if (inject) {
+      pendingInjectRef.current = null;
+      acknowledgeInject(inject);
+      const video = injectToVideo(inject);
+      setRequestCredit(formatRequestCredit(inject));
+      requestFlowRef.current = {
+        anchorVideo: video,
+        vibeSongsRemaining: 1
+      };
+      return video;
+    }
+
+    if (requestFlowRef.current?.vibeSongsRemaining) {
+      const anchor = requestFlowRef.current.anchorVideo;
+      requestFlowRef.current = null;
+      setRequestCredit(null);
+      const vibeTrack = pickVibeMatchFromPlaylist(playlistRef.current, anchor);
+      if (vibeTrack) return vibeTrack;
+    } else {
+      setRequestCredit(null);
+    }
+
     return advanceRotation();
-  }, [advanceRotation, takeInjectTrack]);
+  }, [acknowledgeInject, advanceRotation, formatRequestCredit, injectToVideo]);
 
   const refreshUpNextLabel = useCallback(
     (next?: PlaylistVideo | null) => {
-      if (pendingInjectRef.current) {
-        setUpNext(`${pendingInjectRef.current.title} (request)`);
+      const inject = pendingInjectRef.current;
+      if (inject) {
+        const credit = formatRequestCredit(inject);
+        setUpNext(
+          credit
+            ? `${inject.title} — requested by ${credit}`
+            : `${inject.title} (request)`
+        );
+        return;
+      }
+
+      if (requestFlowRef.current?.vibeSongsRemaining) {
+        const vibe = pickVibeMatchFromPlaylist(
+          playlistRef.current,
+          requestFlowRef.current.anchorVideo
+        );
+        setUpNext(vibe ? `${vibe.title} (keeping the vibe)` : null);
         return;
       }
 
       const upcoming = next ?? peekNextInRotation();
       setUpNext(upcoming?.title ?? null);
     },
-    [peekNextInRotation]
+    [formatRequestCredit, peekNextInRotation]
   );
 
   const resetPlaybackProgress = useCallback(() => {
@@ -574,7 +635,7 @@ export default function LeafLockPlayer({
       updateNowPlayingFromActiveDeck();
       startTimePollingRef.current();
 
-      const upcoming = peekNextInRotation();
+      const upcoming = peekNextScheduledTrack();
       if (upcoming) {
         prefetchOnInactiveDeck(upcoming);
       } else {
@@ -584,7 +645,7 @@ export default function LeafLockPlayer({
     [
       applyDeckVolume,
       clearBlendFallbackTimer,
-      peekNextInRotation,
+      peekNextScheduledTrack,
       prefetchOnInactiveDeck,
       refreshUpNextLabel,
       resetPlaybackProgress,
@@ -691,7 +752,7 @@ export default function LeafLockPlayer({
         savePlayHistory(video.id);
       }
 
-      const upcoming = peekNextInRotation();
+      const upcoming = peekNextScheduledTrack();
       if (upcoming) {
         prefetchOnInactiveDeck(upcoming);
       } else {
@@ -704,7 +765,7 @@ export default function LeafLockPlayer({
       applyDeckVolume,
       cancelActiveCrossfade,
       getDeckPlayer,
-      peekNextInRotation,
+      peekNextScheduledTrack,
       prefetchOnInactiveDeck,
       refreshUpNextLabel,
       resetPlaybackProgress,
@@ -802,6 +863,7 @@ export default function LeafLockPlayer({
   const updateNowPlayingRef = useRef(updateNowPlayingFromActiveDeck);
   const syncPlaybackProgressRef = useRef(syncPlaybackProgress);
   const prefetchOnInactiveDeckRef = useRef(prefetchOnInactiveDeck);
+  const peekNextScheduledTrackRef = useRef(peekNextScheduledTrack);
   const startTimePollingRef = useRef(startTimePolling);
   const stopTimePollingRef = useRef(stopTimePolling);
 
@@ -810,10 +872,12 @@ export default function LeafLockPlayer({
     updateNowPlayingRef.current = updateNowPlayingFromActiveDeck;
     syncPlaybackProgressRef.current = syncPlaybackProgress;
     prefetchOnInactiveDeckRef.current = prefetchOnInactiveDeck;
+    peekNextScheduledTrackRef.current = peekNextScheduledTrack;
     startTimePollingRef.current = startTimePolling;
     stopTimePollingRef.current = stopTimePolling;
   }, [
     playNextTrackAuto,
+    peekNextScheduledTrack,
     prefetchOnInactiveDeck,
     startTimePolling,
     stopTimePolling,
@@ -831,18 +895,6 @@ export default function LeafLockPlayer({
       applyDeckVolume(activeDeckRef.current, 1);
     }
   }, [applyDeckVolume, volume]);
-
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(BLEND_ENABLED_KEY);
-      if (stored === "0") setDjBlendEnabled(false);
-      if (window.localStorage.getItem(SHOW_VIDEO_KEY) === "1") {
-        setShowVideo(true);
-      }
-    } catch {
-      // Ignore storage errors.
-    }
-  }, []);
 
   const resizePlayerHosts = useCallback(() => {
     const shell = videoShellRef.current;
@@ -875,22 +927,27 @@ export default function LeafLockPlayer({
   const syncActiveDeckVideo = useCallback(() => {
     const videoId = currentVideoIdRef.current;
     const deck = activeDeckRef.current;
+    const inactiveDeck = deck === "a" ? "b" : "a";
     const player = getDeckPlayer(deck);
+    const inactivePlayer = getDeckPlayer(inactiveDeck);
     if (!videoId || !player || !playersReadyRef.current[deck]) return;
 
     let resumeTime = 0;
     try {
       resumeTime = player.getCurrentTime();
+      if (!Number.isFinite(resumeTime) || resumeTime < 0) {
+        resumeTime = currentTime;
+      }
     } catch {
-      resumeTime = 0;
+      resumeTime = currentTime;
     }
 
-    if (deckVideoIdRef.current[deck] !== videoId) {
-      player.loadVideoById(videoId);
-      deckVideoIdRef.current[deck] = videoId;
-    }
+    inactivePlayer?.pauseVideo();
 
-    if (resumeTime > 0) {
+    player.loadVideoById(videoId);
+    deckVideoIdRef.current[deck] = videoId;
+
+    if (resumeTime > 0.5) {
       player.seekTo(resumeTime, true);
     }
 
@@ -900,12 +957,50 @@ export default function LeafLockPlayer({
 
     applyDeckVolume(deck, 1);
     window.setTimeout(() => resizePlayerHosts(), 50);
-  }, [applyDeckVolume, getDeckPlayer, resizePlayerHosts]);
+  }, [applyDeckVolume, currentTime, getDeckPlayer, resizePlayerHosts]);
 
   useEffect(() => {
     if (!showVideo || !playersReady) return;
     syncActiveDeckVideo();
-  }, [showVideo, playersReady, syncActiveDeckVideo, currentTrackId]);
+  }, [showVideo, playersReady, syncActiveDeckVideo, currentTrackId, activeDeck]);
+
+  const resumeBackgroundPlayback = useCallback(() => {
+    if (!isPlayingRef.current) return;
+
+    void syncMediaBridge(true);
+    const active = getActivePlayer();
+    if (active) {
+      try {
+        active.playVideo();
+        applyDeckVolume(activeDeckRef.current, 1);
+      } catch {
+        // Player may not be ready yet.
+      }
+    }
+  }, [applyDeckVolume, getActivePlayer, syncMediaBridge]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      resumeBackgroundPlayback();
+    };
+
+    window.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onVisibility);
+    window.addEventListener("focus", onVisibility);
+
+    const keepAliveId = window.setInterval(() => {
+      if (document.visibilityState === "hidden" && isPlayingRef.current) {
+        resumeBackgroundPlayback();
+      }
+    }, 4000);
+
+    return () => {
+      window.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onVisibility);
+      window.removeEventListener("focus", onVisibility);
+      window.clearInterval(keepAliveId);
+    };
+  }, [resumeBackgroundPlayback]);
 
   useEffect(() => {
     if (!playlistReady) return;
@@ -1076,13 +1171,7 @@ export default function LeafLockPlayer({
                   syncPlaybackProgressRef.current();
                   startTimePollingRef.current();
 
-                  const upcomingIndex = rotationIndexRef.current + 1;
-                  if (upcomingIndex >= rotationQueueRef.current.length) {
-                    rotationQueueRef.current = rotationQueueRef.current.concat(
-                      createShuffledRotation(playlistRef.current)
-                    );
-                  }
-                  const upcoming = rotationQueueRef.current[upcomingIndex];
+                  const upcoming = peekNextScheduledTrackRef.current();
                   if (upcoming) {
                     prefetchOnInactiveDeckRef.current(upcoming);
                   }
@@ -1543,7 +1632,7 @@ export default function LeafLockPlayer({
           >
             <span className="inline-flex items-center justify-center gap-2">
               <MonitorPlay className="h-3.5 w-3.5" />
-              Video {showVideo ? "On" : "Off"}
+              Video {showVideo ? "On" : "Off (suggested)"}
             </span>
           </button>
         </div>
@@ -1558,6 +1647,11 @@ export default function LeafLockPlayer({
           <span className="line-clamp-2">{nowPlaying.title}</span>
           <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">{nowPlaying.artist}</span>
         </div>
+        {requestCredit ? (
+          <p className="mt-2 text-sm font-medium text-emerald-400">
+            Requested by {requestCredit}
+          </p>
+        ) : null}
         {upNext ? (
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-amber-400/80">
             Up next: {upNext}
@@ -1586,8 +1680,8 @@ export default function LeafLockPlayer({
           ref={playerHostARef}
           className={
             showVideo
-              ? `absolute inset-0 h-full w-full transition-opacity duration-300 ${
-                  activeDeck === "a" || isBlending ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+              ? `absolute inset-0 h-full w-full ${
+                  activeDeck === "a" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
               : "h-[2px] w-[2px]"
           }
@@ -1596,8 +1690,8 @@ export default function LeafLockPlayer({
           ref={playerHostBRef}
           className={
             showVideo
-              ? `absolute inset-0 h-full w-full transition-opacity duration-300 ${
-                  activeDeck === "b" || isBlending ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+              ? `absolute inset-0 h-full w-full ${
+                  activeDeck === "b" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
               : "h-[2px] w-[2px]"
           }

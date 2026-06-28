@@ -436,6 +436,7 @@ export type PlayerInject = {
   id: string;
   videoId: string;
   title: string;
+  instagram?: string;
 };
 
 export async function peekPlayerInject(): Promise<PlayerInject | null> {
@@ -465,7 +466,8 @@ export async function peekPlayerInject(): Promise<PlayerInject | null> {
     source: "jukebox",
     id: pick.id,
     videoId: pick.videoId,
-    title: pick.title
+    title: pick.title,
+    instagram: pick.instagram
   };
 }
 

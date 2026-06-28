@@ -145,6 +145,13 @@ export function pickNextVideo(videos: PlaylistVideo[]): PlaylistVideo | null {
   return eligible[Math.floor(Math.random() * eligible.length)];
 }
 
+export function pickVibeMatchFromPlaylist(
+  videos: PlaylistVideo[],
+  current?: PlaylistVideo | null
+): PlaylistVideo | null {
+  return pickBlendFriendlyVideo(videos, current);
+}
+
 export function pickBlendFriendlyVideo(
   videos: PlaylistVideo[],
   current?: PlaylistVideo | null
