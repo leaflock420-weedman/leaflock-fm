@@ -266,7 +266,6 @@ export default function LeafLockPlayer({
   const [controlsOffscreen, setControlsOffscreen] = useState(false);
   const [portalReady, setPortalReady] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
-  const [videoDisplayReady, setVideoDisplayReady] = useState(false);
   const [activeDeck, setActiveDeck] = useState<DeckId>("a");
   const [requestCredit, setRequestCredit] = useState<string | null>(null);
   const [liveRoomLabel, setLiveRoomLabel] = useState<string | null>(null);
@@ -301,7 +300,6 @@ export default function LeafLockPlayer({
   const pendingInjectRef = useRef<PlayerInject | null>(null);
   const requestFlowRef = useRef<RequestFlowContext | null>(null);
   const outsidePlaylistAllowedRef = useRef<string | null>(null);
-  const showVideoRef = useRef(false);
   const stationRevisionRef = useRef(-1);
   const listenModeRef = useRef(listenMode);
 
@@ -465,9 +463,6 @@ export default function LeafLockPlayer({
     currentVideoIdRef.current = video.id;
     setCurrentTrackId(video.id);
     setNowPlaying({ title: video.title, artist });
-    if (showVideoRef.current) {
-      setVideoDisplayReady(true);
-    }
     bindMediaSessionRef.current();
     updateMediaSessionRef.current(isPlayingRef.current);
   }, []);
@@ -920,10 +915,6 @@ export default function LeafLockPlayer({
   }, [djBlendEnabled]);
 
   useEffect(() => {
-    showVideoRef.current = showVideo;
-  }, [showVideo]);
-
-  useEffect(() => {
     listenModeRef.current = listenMode;
     if (listenMode === "live") {
       setLiveRoomLabel("Live room — synced with everyone");
@@ -942,21 +933,32 @@ export default function LeafLockPlayer({
 
   const resizePlayerHosts = useCallback(() => {
     const shell = videoShellRef.current;
-    const width = showVideo && videoDisplayReady && shell ? shell.clientWidth : 2;
-    const height = showVideo && videoDisplayReady && shell ? shell.clientHeight : 2;
+    const fullWidth = showVideo && shell && shell.clientWidth > 0 ? shell.clientWidth : 2;
+    const fullHeight = showVideo && shell && shell.clientHeight > 0 ? shell.clientHeight : 2;
 
     (["a", "b"] as DeckId[]).forEach((deck) => {
-      playersRef.current[deck]?.setSize(width, height);
+      const player = playersRef.current[deck];
+      if (!player) return;
+
+      const isActive = deck === activeDeckRef.current;
+      const width = showVideo && isActive ? fullWidth : 2;
+      const height = showVideo && isActive ? fullHeight : 2;
+      player.setSize(width, height);
     });
-  }, [showVideo, videoDisplayReady]);
+  }, [showVideo]);
 
   useEffect(() => {
     if (!playersReady) return;
     resizePlayerHosts();
-  }, [playersReady, resizePlayerHosts, showVideo, videoDisplayReady, activeDeck, isBlending]);
+    if (!showVideo) return;
+    const timerId = window.setTimeout(() => {
+      resizePlayerHosts();
+    }, 120);
+    return () => window.clearTimeout(timerId);
+  }, [playersReady, resizePlayerHosts, showVideo, activeDeck, isBlending]);
 
   useEffect(() => {
-    if (!showVideo || !videoDisplayReady) return;
+    if (!showVideo) return;
 
     const shell = videoShellRef.current;
     if (!shell || typeof ResizeObserver === "undefined") return;
@@ -966,7 +968,7 @@ export default function LeafLockPlayer({
     });
     observer.observe(shell);
     return () => observer.disconnect();
-  }, [showVideo, videoDisplayReady, resizePlayerHosts]);
+  }, [showVideo, resizePlayerHosts]);
 
   const applyLiveStationTrack = useCallback(
     (station: PublicStationPayload, options?: { forceReload?: boolean }) => {
@@ -1575,19 +1577,11 @@ export default function LeafLockPlayer({
   };
 
   const toggleVideo = () => {
-    setShowVideo((current) => {
-      const next = !current;
-      if (!next) {
-        setVideoDisplayReady(false);
-      } else {
-        const deck = activeDeckRef.current;
-        const canShowNow =
-          Boolean(currentVideoIdRef.current) &&
-          deckVideoIdRef.current[deck] === currentVideoIdRef.current;
-        setVideoDisplayReady(canShowNow);
-        window.setTimeout(() => resizePlayerHosts(), 80);
-      }
-      return next;
+    setShowVideo((current) => !current);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        resizePlayerHosts();
+      });
     });
   };
 
@@ -1783,9 +1777,6 @@ export default function LeafLockPlayer({
             Requested by {requestCredit}
           </p>
         ) : null}
-        {showVideo && !videoDisplayReady ? (
-          <p className="mt-2 text-xs text-zinc-500">Video starts on the next track</p>
-        ) : null}
         {upNext ? (
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-amber-400/80">
             Up next: {upNext}
@@ -1804,16 +1795,16 @@ export default function LeafLockPlayer({
       <div
         ref={videoShellRef}
         className={
-          showVideo && videoDisplayReady
+          showVideo
             ? "relative mb-5 aspect-video w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black sm:mb-6"
             : "pointer-events-none absolute left-0 top-0 h-[2px] w-[2px] overflow-hidden opacity-[0.01]"
         }
-        aria-hidden={!showVideo || !videoDisplayReady}
+        aria-hidden={!showVideo}
       >
         <div
           ref={playerHostARef}
           className={
-            showVideo && videoDisplayReady
+            showVideo
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "a" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
@@ -1823,7 +1814,7 @@ export default function LeafLockPlayer({
         <div
           ref={playerHostBRef}
           className={
-            showVideo && videoDisplayReady
+            showVideo
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "b" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
