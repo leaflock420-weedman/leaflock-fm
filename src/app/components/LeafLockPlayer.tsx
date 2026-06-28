@@ -301,6 +301,7 @@ export default function LeafLockPlayer({
   const requestFlowRef = useRef<RequestFlowContext | null>(null);
   const outsidePlaylistAllowedRef = useRef<string | null>(null);
   const stationRevisionRef = useRef(-1);
+  const stationEndedAtRef = useRef(0);
   const listenModeRef = useRef(listenMode);
 
   const syncPreviousState = useCallback(() => {
@@ -976,13 +977,12 @@ export default function LeafLockPlayer({
       if (!player || !playersReadyRef.current[activeDeckRef.current]) return;
 
       const track = station.current;
-      const changed =
-        options?.forceReload ||
-        station.revision !== stationRevisionRef.current ||
-        currentVideoIdRef.current !== track.videoId;
+      const deck = activeDeckRef.current;
+      const videoChanged = currentVideoIdRef.current !== track.videoId;
+      const revisionChanged = station.revision !== stationRevisionRef.current;
+      const shouldReload =
+        Boolean(options?.forceReload && videoChanged) || (revisionChanged && videoChanged);
 
-      stationRevisionRef.current = station.revision;
-      outsidePlaylistAllowedRef.current = track.videoId;
       setRequestCredit(station.requestCredit);
       setUpNext(station.upNext);
       setLiveRoomLabel(
@@ -991,6 +991,13 @@ export default function LeafLockPlayer({
           : "Live room — synced with everyone"
       );
 
+      if (!revisionChanged && !videoChanged) {
+        return;
+      }
+
+      stationRevisionRef.current = station.revision;
+      outsidePlaylistAllowedRef.current = track.videoId;
+
       const video: PlaylistVideo = {
         id: track.videoId,
         title: track.title,
@@ -998,27 +1005,32 @@ export default function LeafLockPlayer({
         durationSec: track.durationSec
       };
 
-      if (changed) {
-        setTrackUi(video, track.artist ?? "LeafLock FM");
-        player.loadVideoById(track.videoId);
-        deckVideoIdRef.current[activeDeckRef.current] = track.videoId;
-      }
+      setTrackUi(video, track.artist ?? "LeafLock FM");
 
-      if (station.offsetSeconds > 0.5) {
+      const resumeAt = Math.max(0, station.offsetSeconds);
+      const startPlayback = () => {
         try {
-          player.seekTo(station.offsetSeconds, true);
+          if (resumeAt > 0.5) {
+            player.seekTo(resumeAt, true);
+          }
+          player.playVideo();
+          isPlayingRef.current = true;
+          setIsPlaying(true);
+          setIsConnected(true);
+          setIsBuffering(false);
+          applyDeckVolume(deck, 1);
+          startTimePollingRef.current();
         } catch {
-          // Player may not be ready to seek yet.
+          // Player may not be ready yet.
         }
-      }
+      };
 
-      if (isPlayingRef.current || changed) {
-        player.playVideo();
-        isPlayingRef.current = true;
-        setIsPlaying(true);
-        setIsConnected(true);
-        applyDeckVolume(activeDeckRef.current, 1);
-        startTimePollingRef.current();
+      if (shouldReload || deckVideoIdRef.current[deck] !== track.videoId) {
+        player.loadVideoById(track.videoId);
+        deckVideoIdRef.current[deck] = track.videoId;
+        window.setTimeout(startPlayback, 500);
+      } else {
+        startPlayback();
       }
 
       window.setTimeout(() => resizePlayerHosts(), 50);
@@ -1080,15 +1092,36 @@ export default function LeafLockPlayer({
         const player = getActivePlayer();
         if (!player) return;
 
-        const drift =
-          station.revision === stationRevisionRef.current
-            ? Math.abs((player.getCurrentTime?.() ?? 0) - station.offsetSeconds)
-            : 999;
+        const videoChanged = station.current.videoId !== currentVideoIdRef.current;
+        const revisionChanged = station.revision !== stationRevisionRef.current;
 
-        if (station.revision !== stationRevisionRef.current || drift > 5) {
-          applyLiveStationTrack(station, {
-            forceReload: station.revision !== stationRevisionRef.current
-          });
+        if (revisionChanged || videoChanged) {
+          applyLiveStationTrack(station, { forceReload: videoChanged });
+          return;
+        }
+
+        setUpNext(station.upNext);
+        setRequestCredit(station.requestCredit);
+        setLiveRoomLabel(
+          station.listenerCount && station.listenerCount > 0
+            ? `Live room — ${station.listenerCount} listening`
+            : "Live room — synced with everyone"
+        );
+
+        let localTime = 0;
+        try {
+          localTime = player.getCurrentTime?.() ?? 0;
+        } catch {
+          localTime = 0;
+        }
+
+        const drift = Math.abs(localTime - station.offsetSeconds);
+        if (drift > 30) {
+          try {
+            player.seekTo(station.offsetSeconds, true);
+          } catch {
+            // Player may not be ready to seek yet.
+          }
         }
       } catch {
         // Ignore station sync errors.
@@ -1098,7 +1131,7 @@ export default function LeafLockPlayer({
     void syncStation();
     const intervalId = window.setInterval(() => {
       void syncStation();
-    }, 4000);
+    }, 8000);
 
     return () => window.clearInterval(intervalId);
   }, [applyLiveStationTrack, getActivePlayer, listenMode, playlistReady, playersReady]);
@@ -1300,10 +1333,18 @@ export default function LeafLockPlayer({
               if (event.data === YT.PlayerState.ENDED) {
                 if (deck === activeDeckRef.current && !blendInProgressRef.current) {
                   if (listenModeRef.current === "live") {
+                    const now = Date.now();
+                    if (now - stationEndedAtRef.current < 12_000) {
+                      return;
+                    }
+                    stationEndedAtRef.current = now;
+
                     void fetch("/api/fm/station", { cache: "no-store" })
                       .then((response) => response.json())
                       .then((station: PublicStationPayload) => {
-                        applyLiveStationTrackRef.current(station, { forceReload: true });
+                        if (station.current?.videoId !== currentVideoIdRef.current) {
+                          applyLiveStationTrackRef.current(station, { forceReload: true });
+                        }
                       })
                       .catch(() => {
                         // Station poll will recover on next interval.

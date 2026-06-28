@@ -49,9 +49,34 @@ export type PublicStation = {
   listeners: Awaited<ReturnType<typeof getLiveListeners>>;
 };
 
+const DEFAULT_TRACK_SECONDS = 240;
+const REQUEST_TRACK_SECONDS = 180;
+const MIN_VALID_DURATION_SECONDS = 15;
+
 function trackDurationSec(track: StationTrack): number {
-  if (track.durationSec && track.durationSec > 0) return track.durationSec;
-  return 240;
+  const duration = track.durationSec;
+
+  if (track.source === "jukebox" || track.source === "owner") {
+    if (!duration || duration < MIN_VALID_DURATION_SECONDS) {
+      return REQUEST_TRACK_SECONDS;
+    }
+    return duration;
+  }
+
+  if (!duration || duration <= 0) return DEFAULT_TRACK_SECONDS;
+  if (duration < MIN_VALID_DURATION_SECONDS) return DEFAULT_TRACK_SECONDS;
+  return duration;
+}
+
+let stationMutex: Promise<void> = Promise.resolve();
+
+async function withStationMutex<T>(work: () => Promise<T>): Promise<T> {
+  const next = stationMutex.then(work);
+  stationMutex = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
 }
 
 function toStationTrack(
@@ -205,51 +230,53 @@ async function advanceStation(state: StationState): Promise<StationState> {
 }
 
 export async function getPublicStation(): Promise<PublicStation> {
-  let state = await loadStationState();
-  const config = await getFmPublicConfig();
-  const activePlaylistId = config.simplePlaylistId || config.playlistId;
+  return withStationMutex(async () => {
+    let state = await loadStationState();
+    const config = await getFmPublicConfig();
+    const activePlaylistId = config.simplePlaylistId || config.playlistId;
 
-  if (!state) {
-    state = await bootstrapStation();
-    await saveStationState(state);
-  }
+    if (!state) {
+      state = await bootstrapStation();
+      await saveStationState(state);
+    }
 
-  if (state.playlistId !== activePlaylistId) {
-    state = await bootstrapStation();
-    await saveStationState(state);
-  }
+    if (state.playlistId !== activePlaylistId) {
+      state = await bootstrapStation();
+      await saveStationState(state);
+    }
 
-  let guard = 0;
-  while (guard < 4) {
-    const elapsed =
-      (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
+    let guard = 0;
+    while (guard < 2) {
+      const elapsed =
+        (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
+      const duration = trackDurationSec(state.current);
+
+      if (elapsed < duration - 1) break;
+
+      state = await advanceStation(state);
+      await saveStationState(state);
+      guard += 1;
+    }
+
+    const elapsed = (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
     const duration = trackDurationSec(state.current);
+    const peekState = { ...state };
+    const upcoming = peekNextInRotation(peekState);
 
-    if (elapsed < duration - 0.35) break;
+    const listeners = await getLiveListeners();
 
-    state = await advanceStation(state);
-    await saveStationState(state);
-    guard += 1;
-  }
-
-  const elapsed = (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
-  const duration = trackDurationSec(state.current);
-  const peekState = { ...state };
-  const upcoming = peekNextInRotation(peekState);
-
-  const listeners = await getLiveListeners();
-
-  return {
-    revision: state.revision,
-    playlistId: state.playlistId,
-    current: state.current,
-    offsetSeconds: Math.max(0, Math.min(elapsed, duration)),
-    upNext: upcoming?.title ?? null,
-    requestCredit: state.current.requestCredit ?? null,
-    isPlaying: state.isPlaying,
-    listenerCount: listeners.length,
-    listeners
-  };
+    return {
+      revision: state.revision,
+      playlistId: state.playlistId,
+      current: state.current,
+      offsetSeconds: Math.max(0, Math.min(elapsed, duration)),
+      upNext: upcoming?.title ?? null,
+      requestCredit: state.current.requestCredit ?? null,
+      isPlaying: state.isPlaying,
+      listenerCount: listeners.length,
+      listeners
+    };
+  });
 }
 
 export async function resetLiveStation(): Promise<PublicStation> {
