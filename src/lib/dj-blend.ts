@@ -1,6 +1,6 @@
 export const DEFAULT_PRE_ROLL_MS = 500;
 export const DEFAULT_BLEND_DURATION_MS = 4500;
-export const DEFAULT_BLEND_LEAD_SEC = 6;
+export const DEFAULT_BLEND_LEAD_SEC = 15;
 export const BLEND_POLL_INTERVAL_MS = 250;
 export const TOTAL_BLEND_MS = DEFAULT_PRE_ROLL_MS + DEFAULT_BLEND_DURATION_MS;
 
@@ -48,13 +48,13 @@ export function djMixGains(progress: number): { outgoing: number; incoming: numb
 
 export function computeBlendLeadSeconds(trackDurationSec?: number): number {
   const totalOverlapSec = TOTAL_BLEND_MS / 1000 + 0.5;
+  const lead = Math.max(DEFAULT_BLEND_LEAD_SEC, totalOverlapSec);
 
   if (!trackDurationSec || trackDurationSec <= 0) {
-    return Math.max(DEFAULT_BLEND_LEAD_SEC, totalOverlapSec);
+    return lead;
   }
 
-  const ratioLead = trackDurationSec * 0.2;
-  return Math.min(22, Math.max(totalOverlapSec, ratioLead));
+  return Math.min(lead, Math.max(totalOverlapSec, trackDurationSec - 1));
 }
 
 export function shouldStartBlend(

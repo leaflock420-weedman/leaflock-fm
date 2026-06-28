@@ -1,20 +1,35 @@
 import { emailTopLovedDigest } from "@/lib/fm-email";
 import {
+  addOwnerQueueItem,
   getFmDeskSettings,
+  getJukeboxSuggestions,
+  getLiveListeners,
+  getOwnerQueue,
   getTopLikes,
+  getTrackRequests,
   saveFmDeskSettings,
+  updateJukeboxSuggestion,
   verifyFmDeskAccess,
   type FmDeskSettings
 } from "@/lib/fm-store";
 import { normalizePlaylists, type FmPlaylistKey } from "@/lib/fm-playlists";
+import { parseYouTubeVideoId } from "@/lib/youtube-url";
 
 export async function GET(request: Request) {
   if (!verifyFmDeskAccess(request)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const [settings, topLikes] = await Promise.all([getFmDeskSettings(), getTopLikes(25)]);
-  return Response.json({ settings, topLikes });
+  const [settings, topLikes, jukebox, listeners, requests, ownerQueue] = await Promise.all([
+    getFmDeskSettings(),
+    getTopLikes(25),
+    getJukeboxSuggestions("pending"),
+    getLiveListeners(),
+    getTrackRequests(15),
+    getOwnerQueue()
+  ]);
+
+  return Response.json({ settings, topLikes, jukebox, listeners, requests, ownerQueue });
 }
 
 export async function PUT(request: Request) {
@@ -50,10 +65,40 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json()) as { action?: string };
+  const body = (await request.json()) as {
+    action?: string;
+    videoId?: string;
+    youtubeUrl?: string;
+    title?: string;
+    jukeboxId?: string;
+    jukeboxStatus?: "played" | "skipped";
+  };
+
   if (body.action === "email-loved") {
     const result = await emailTopLovedDigest(20);
     return Response.json(result);
+  }
+
+  if (body.action === "queue-track") {
+    const videoId =
+      parseYouTubeVideoId(body.videoId ?? "") ?? parseYouTubeVideoId(body.youtubeUrl ?? "");
+    if (!videoId) {
+      return Response.json({ error: "Valid YouTube link or video ID required" }, { status: 400 });
+    }
+
+    const item = await addOwnerQueueItem({
+      videoId,
+      title: body.title?.trim() || `Queued track ${videoId}`
+    });
+    return Response.json({ item });
+  }
+
+  if (body.action === "jukebox-status" && body.jukeboxId && body.jukeboxStatus) {
+    const item = await updateJukeboxSuggestion(body.jukeboxId, body.jukeboxStatus);
+    if (!item) {
+      return Response.json({ error: "Jukebox item not found" }, { status: 404 });
+    }
+    return Response.json({ item });
   }
 
   return Response.json({ error: "Unknown action" }, { status: 400 });

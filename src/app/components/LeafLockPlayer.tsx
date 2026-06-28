@@ -26,10 +26,17 @@ import {
 } from "@/lib/dj-blend";
 import { pickPlaylistId, type FmPlayerMode } from "@/lib/fm-player-config";
 import {
-  pickUpcomingTrack,
+  createShuffledRotation,
   savePlayHistory,
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
+
+type PlayerInject = {
+  source: "owner" | "jukebox";
+  id: string;
+  videoId: string;
+  title: string;
+};
 
 type DeckId = "a" | "b";
 
@@ -130,7 +137,7 @@ function loadYouTubeApi(): Promise<YTNamespace> {
   });
 }
 
-function createPlayerVars(): Record<string, string | number> {
+function createPlayerVars(playlistId?: string | null): Record<string, string | number> {
   const playerVars: Record<string, string | number> = {
     autoplay: 0,
     controls: 0,
@@ -139,8 +146,14 @@ function createPlayerVars(): Record<string, string | number> {
     fs: 0,
     modestbranding: 1,
     rel: 0,
-    playsinline: 1
+    playsinline: 1,
+    iv_load_policy: 3
   };
+
+  if (playlistId) {
+    playerVars.listType = "playlist";
+    playerVars.list = playlistId;
+  }
 
   if (typeof window !== "undefined") {
     playerVars.origin = window.location.origin;
@@ -251,6 +264,13 @@ export default function LeafLockPlayer({
   const deckVideoIdRef = useRef<Record<DeckId, string | null>>({ a: null, b: null });
   const playerHostARef = useRef<HTMLDivElement | null>(null);
   const playerHostBRef = useRef<HTMLDivElement | null>(null);
+  const playlistSetRef = useRef<Set<string>>(new Set());
+  const playlistIdRef = useRef<string | null>(null);
+  const rotationQueueRef = useRef<PlaylistVideo[]>([]);
+  const rotationIndexRef = useRef(-1);
+  const prefetchedNextRef = useRef<PlaylistVideo | null>(null);
+  const pendingInjectRef = useRef<PlayerInject | null>(null);
+  const outsidePlaylistAllowedRef = useRef<string | null>(null);
 
   const syncPreviousState = useCallback(() => {
     setCanGoPrevious(sessionIndexRef.current > 0);
@@ -272,12 +292,84 @@ export default function LeafLockPlayer({
     return sessionQueueRef.current[sessionIndexRef.current] ?? null;
   }, []);
 
-  const pickNextForPlayback = useCallback((): PlaylistVideo | null => {
-    return pickUpcomingTrack(playlistRef.current, {
-      blendEnabled: blendEnabledRef.current,
-      current: getCurrentSessionTrack()
+  const ensureRotationQueue = useCallback(() => {
+    if (rotationQueueRef.current.length === 0) {
+      rotationQueueRef.current = createShuffledRotation(playlistRef.current);
+    }
+  }, []);
+
+  const extendRotationQueue = useCallback(() => {
+    rotationQueueRef.current = rotationQueueRef.current.concat(
+      createShuffledRotation(playlistRef.current)
+    );
+  }, []);
+
+  const peekNextInRotation = useCallback((): PlaylistVideo | null => {
+    ensureRotationQueue();
+    const nextIndex = rotationIndexRef.current + 1;
+    if (nextIndex >= rotationQueueRef.current.length) {
+      extendRotationQueue();
+    }
+    return rotationQueueRef.current[nextIndex] ?? null;
+  }, [ensureRotationQueue, extendRotationQueue]);
+
+  const advanceRotation = useCallback((): PlaylistVideo | null => {
+    const next = peekNextInRotation();
+    if (next) {
+      rotationIndexRef.current += 1;
+    }
+    return next;
+  }, [peekNextInRotation]);
+
+  const isInPlaylist = useCallback((videoId: string | null | undefined) => {
+    if (!videoId) return false;
+    if (outsidePlaylistAllowedRef.current === videoId) return true;
+    return playlistSetRef.current.has(videoId);
+  }, []);
+
+  const acknowledgeInject = useCallback((inject: PlayerInject) => {
+    void fetch("/api/fm/player-inject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "ack", inject })
     });
-  }, [getCurrentSessionTrack]);
+  }, []);
+
+  const injectToVideo = useCallback((inject: PlayerInject): PlaylistVideo => {
+    outsidePlaylistAllowedRef.current = inject.videoId;
+    return {
+      id: inject.videoId,
+      title: inject.title,
+      channelTitle: inject.source === "jukebox" ? "Jukebox" : "DJ queue"
+    };
+  }, []);
+
+  const takeInjectTrack = useCallback((): PlaylistVideo | null => {
+    const inject = pendingInjectRef.current;
+    if (!inject) return null;
+    pendingInjectRef.current = null;
+    acknowledgeInject(inject);
+    return injectToVideo(inject);
+  }, [acknowledgeInject, injectToVideo]);
+
+  const resolveNextTrack = useCallback((): PlaylistVideo | null => {
+    const injectTrack = takeInjectTrack();
+    if (injectTrack) return injectTrack;
+    return advanceRotation();
+  }, [advanceRotation, takeInjectTrack]);
+
+  const refreshUpNextLabel = useCallback(
+    (next?: PlaylistVideo | null) => {
+      if (pendingInjectRef.current) {
+        setUpNext(`${pendingInjectRef.current.title} (request)`);
+        return;
+      }
+
+      const upcoming = next ?? peekNextInRotation();
+      setUpNext(upcoming?.title ?? null);
+    },
+    [peekNextInRotation]
+  );
 
   const resetPlaybackProgress = useCallback(() => {
     isSeekingRef.current = false;
@@ -288,6 +380,9 @@ export default function LeafLockPlayer({
   }, []);
 
   const setTrackUi = useCallback((video: PlaylistVideo, artist = "LeafLock FM") => {
+    if (playlistSetRef.current.has(video.id)) {
+      outsidePlaylistAllowedRef.current = null;
+    }
     currentVideoIdRef.current = video.id;
     setCurrentTrackId(video.id);
     setNowPlaying({ title: video.title, artist });
@@ -451,9 +546,10 @@ export default function LeafLockPlayer({
       if (!player || !playersReadyRef.current[deck]) return;
       player.cueVideoById(video.id);
       deckVideoIdRef.current[deck] = video.id;
-      setUpNext(video.title);
+      prefetchedNextRef.current = video;
+      refreshUpNextLabel(video);
     },
-    [getDeckPlayer, getInactiveDeck]
+    [getDeckPlayer, getInactiveDeck, refreshUpNextLabel]
   );
 
   const finishBlendRef = useRef<
@@ -484,16 +580,19 @@ export default function LeafLockPlayer({
       updateNowPlayingFromActiveDeck();
       startTimePollingRef.current();
 
-      const upcoming = pickNextForPlayback();
+      const upcoming = peekNextInRotation();
       if (upcoming) {
         prefetchOnInactiveDeck(upcoming);
+      } else {
+        refreshUpNextLabel(null);
       }
     },
     [
       applyDeckVolume,
       clearBlendFallbackTimer,
-      pickNextForPlayback,
+      peekNextInRotation,
       prefetchOnInactiveDeck,
+      refreshUpNextLabel,
       resetPlaybackProgress,
       setTrackUi,
       updateNowPlayingFromActiveDeck
@@ -598,9 +697,11 @@ export default function LeafLockPlayer({
         savePlayHistory(video.id);
       }
 
-      const upcoming = pickNextForPlayback();
+      const upcoming = peekNextInRotation();
       if (upcoming) {
         prefetchOnInactiveDeck(upcoming);
+      } else {
+        refreshUpNextLabel(null);
       }
 
       return true;
@@ -609,15 +710,16 @@ export default function LeafLockPlayer({
       applyDeckVolume,
       cancelActiveCrossfade,
       getDeckPlayer,
-      pickNextForPlayback,
+      peekNextInRotation,
       prefetchOnInactiveDeck,
+      refreshUpNextLabel,
       resetPlaybackProgress,
       setTrackUi
     ]
   );
 
   const playNextTrackFromGesture = useCallback(() => {
-    const next = pickNextForPlayback();
+    const next = resolveNextTrack();
     if (!next) {
       setPlaybackError("Playlist is empty.");
       setIsPlaying(false);
@@ -631,10 +733,10 @@ export default function LeafLockPlayer({
 
     queueNextTrack(next);
     return playInstantOnActiveDeck(next);
-  }, [beginBlendToVideo, pickNextForPlayback, playInstantOnActiveDeck, queueNextTrack]);
+  }, [beginBlendToVideo, playInstantOnActiveDeck, queueNextTrack, resolveNextTrack]);
 
   const playNextTrackAuto = useCallback(() => {
-    const next = pickNextForPlayback();
+    const next = resolveNextTrack();
     if (!next) {
       setPlaybackError("Playlist is empty.");
       setIsPlaying(false);
@@ -656,7 +758,7 @@ export default function LeafLockPlayer({
         setPlaybackError("Tap play to continue on phone.");
       }, 1200);
     }
-  }, [beginBlendToVideo, getActivePlayer, isMobile, pickNextForPlayback, playInstantOnActiveDeck, queueNextTrack]);
+  }, [beginBlendToVideo, getActivePlayer, isMobile, playInstantOnActiveDeck, queueNextTrack, resolveNextTrack]);
 
   const playPreviousTrackFromGesture = useCallback(() => {
     if (sessionIndexRef.current <= 0) return false;
@@ -685,14 +787,14 @@ export default function LeafLockPlayer({
         return;
       }
 
-      const next = pickNextForPlayback();
+      const next = resolveNextTrack();
       if (!next) return;
 
       beginBlendToVideo(next);
     } catch {
       // Player may not expose timing yet.
     }
-  }, [beginBlendToVideo, getActivePlayer, getCurrentSessionTrack, pickNextForPlayback]);
+  }, [beginBlendToVideo, getActivePlayer, getCurrentSessionTrack, resolveNextTrack]);
 
   const startTimePolling = useCallback(() => {
     stopTimePolling();
@@ -705,7 +807,6 @@ export default function LeafLockPlayer({
   const playNextTrackAutoRef = useRef(playNextTrackAuto);
   const updateNowPlayingRef = useRef(updateNowPlayingFromActiveDeck);
   const syncPlaybackProgressRef = useRef(syncPlaybackProgress);
-  const pickNextForPlaybackRef = useRef(pickNextForPlayback);
   const prefetchOnInactiveDeckRef = useRef(prefetchOnInactiveDeck);
   const startTimePollingRef = useRef(startTimePolling);
   const stopTimePollingRef = useRef(stopTimePolling);
@@ -714,12 +815,10 @@ export default function LeafLockPlayer({
     playNextTrackAutoRef.current = playNextTrackAuto;
     updateNowPlayingRef.current = updateNowPlayingFromActiveDeck;
     syncPlaybackProgressRef.current = syncPlaybackProgress;
-    pickNextForPlaybackRef.current = pickNextForPlayback;
     prefetchOnInactiveDeckRef.current = prefetchOnInactiveDeck;
     startTimePollingRef.current = startTimePolling;
     stopTimePollingRef.current = stopTimePolling;
   }, [
-    pickNextForPlayback,
     playNextTrackAuto,
     prefetchOnInactiveDeck,
     startTimePolling,
@@ -779,6 +878,63 @@ export default function LeafLockPlayer({
     return () => observer.disconnect();
   }, [showVideo, resizePlayerHosts]);
 
+  const syncActiveDeckVideo = useCallback(() => {
+    const videoId = currentVideoIdRef.current;
+    const deck = activeDeckRef.current;
+    const player = getDeckPlayer(deck);
+    if (!videoId || !player || !playersReadyRef.current[deck]) return;
+
+    let resumeTime = 0;
+    try {
+      resumeTime = player.getCurrentTime();
+    } catch {
+      resumeTime = 0;
+    }
+
+    if (deckVideoIdRef.current[deck] !== videoId) {
+      player.loadVideoById(videoId);
+      deckVideoIdRef.current[deck] = videoId;
+    }
+
+    if (resumeTime > 0) {
+      player.seekTo(resumeTime, true);
+    }
+
+    if (isPlayingRef.current) {
+      player.playVideo();
+    }
+
+    applyDeckVolume(deck, 1);
+    window.setTimeout(() => resizePlayerHosts(), 50);
+  }, [applyDeckVolume, getDeckPlayer, resizePlayerHosts]);
+
+  useEffect(() => {
+    if (!showVideo || !playersReady) return;
+    syncActiveDeckVideo();
+  }, [showVideo, playersReady, syncActiveDeckVideo, currentTrackId]);
+
+  useEffect(() => {
+    if (!playlistReady) return;
+
+    const pollInject = async () => {
+      try {
+        const response = await fetch("/api/fm/player-inject", { cache: "no-store" });
+        const payload = (await response.json()) as { inject?: PlayerInject | null };
+        pendingInjectRef.current = payload.inject ?? null;
+        refreshUpNextLabel();
+      } catch {
+        // Ignore polling errors.
+      }
+    };
+
+    void pollInject();
+    const intervalId = window.setInterval(() => {
+      void pollInject();
+    }, 45_000);
+
+    return () => window.clearInterval(intervalId);
+  }, [playlistReady, refreshUpNextLabel]);
+
   useEffect(() => {
     const mobile =
       /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ||
@@ -829,6 +985,11 @@ export default function LeafLockPlayer({
         if (cancelled) return;
 
         playlistRef.current = payload.videos;
+        playlistSetRef.current = new Set(payload.videos.map((video) => video.id));
+        playlistIdRef.current = activePlaylistId;
+        rotationQueueRef.current = createShuffledRotation(payload.videos);
+        rotationIndexRef.current = 0;
+        prefetchedNextRef.current = null;
         setPlaylistCount(payload.count ?? payload.videos.length);
         setPlaylistReady(true);
         setNowPlaying({
@@ -869,7 +1030,7 @@ export default function LeafLockPlayer({
         const player = new YT.Player(host, {
           height: "2",
           width: "2",
-          playerVars: createPlayerVars(),
+          playerVars: createPlayerVars(playlistIdRef.current),
           events: {
             onReady: (event) => {
               playersReadyRef.current[deck] = true;
@@ -886,6 +1047,28 @@ export default function LeafLockPlayer({
               }
 
               if (event.data === YT.PlayerState.PLAYING) {
+                try {
+                  const data = event.target.getVideoData();
+                  const playingId = data.video_id;
+                  const allowed =
+                    !playingId ||
+                    outsidePlaylistAllowedRef.current === playingId ||
+                    playlistSetRef.current.has(playingId);
+
+                  if (playingId && deck === activeDeckRef.current && !allowed) {
+                    const current = sessionQueueRef.current[sessionIndexRef.current];
+                    if (current) {
+                      event.target.loadVideoById(current.id);
+                      event.target.playVideo();
+                    } else {
+                      playNextTrackAutoRef.current();
+                    }
+                    return;
+                  }
+                } catch {
+                  // Player may not expose metadata yet.
+                }
+
                 isPlayingRef.current = true;
                 setIsPlaying(true);
                 setIsConnected(true);
@@ -899,7 +1082,13 @@ export default function LeafLockPlayer({
                   syncPlaybackProgressRef.current();
                   startTimePollingRef.current();
 
-                  const upcoming = pickNextForPlaybackRef.current();
+                  const upcomingIndex = rotationIndexRef.current + 1;
+                  if (upcomingIndex >= rotationQueueRef.current.length) {
+                    rotationQueueRef.current = rotationQueueRef.current.concat(
+                      createShuffledRotation(playlistRef.current)
+                    );
+                  }
+                  const upcoming = rotationQueueRef.current[upcomingIndex];
                   if (upcoming) {
                     prefetchOnInactiveDeckRef.current(upcoming);
                   }
@@ -971,13 +1160,13 @@ export default function LeafLockPlayer({
         playersRef.current.a = playerA;
         playersRef.current.b = playerB;
 
-        const first = pickUpcomingTrack(playlistRef.current, { blendEnabled: true });
-        const second = first
-          ? pickUpcomingTrack(
-              playlistRef.current.filter((video) => video.id !== first.id),
-              { blendEnabled: true, current: first }
-            )
-          : null;
+        if (rotationQueueRef.current.length === 0) {
+          rotationQueueRef.current = createShuffledRotation(playlistRef.current);
+        }
+
+        const first = rotationQueueRef.current[0] ?? null;
+        const second = rotationQueueRef.current[1] ?? null;
+        rotationIndexRef.current = 0;
 
         if (first) {
           sessionQueueRef.current = [first];
@@ -991,6 +1180,7 @@ export default function LeafLockPlayer({
         if (second) {
           playerB.cueVideoById(second.id);
           deckVideoIdRef.current.b = second.id;
+          prefetchedNextRef.current = second;
           setUpNext(second.title);
         }
       } catch (error) {
@@ -1519,8 +1709,8 @@ export default function LeafLockPlayer({
             "Smooth DJ mix — 5 second crossfade in progress"
           ) : isConnected && isPlaying ? (
             djBlendEnabled
-              ? "Smart DJ blend — 5 second crossfades between tracks"
-              : "Shuffling playlist — no repeat within 60 minutes"
+              ? "DJ blend — starts in the last 15 seconds with a 5 second crossfade"
+              : "Shuffling your playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
             "Loading YouTube playlist..."
           ) : (

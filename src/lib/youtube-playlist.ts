@@ -124,6 +124,21 @@ export function savePlayHistory(videoId: string) {
   window.localStorage.setItem(PLAY_HISTORY_KEY, JSON.stringify(history));
 }
 
+function shuffleInPlace<T>(items: T[]): T[] {
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [items[index], items[swapIndex]] = [items[swapIndex], items[index]];
+  }
+  return items;
+}
+
+export function createShuffledRotation(videos: PlaylistVideo[]): PlaylistVideo[] {
+  if (videos.length === 0) return [];
+  const eligible = getEligibleVideos(videos);
+  const pool = eligible.length > 0 ? eligible : [...videos];
+  return shuffleInPlace([...pool]);
+}
+
 export function pickNextVideo(videos: PlaylistVideo[]): PlaylistVideo | null {
   const eligible = getEligibleVideos(videos);
   if (eligible.length === 0) return null;
@@ -156,13 +171,11 @@ export function pickBlendFriendlyVideo(
   return shortlist[Math.floor(Math.random() * shortlist.length)].video;
 }
 
+/** @deprecated Use rotation queue in LeafLockPlayer instead. */
 export function pickUpcomingTrack(
   videos: PlaylistVideo[],
   options?: { blendEnabled?: boolean; current?: PlaylistVideo | null }
 ): PlaylistVideo | null {
-  if (options?.blendEnabled) {
-    return pickBlendFriendlyVideo(videos, options.current ?? null);
-  }
-
+  void options;
   return pickNextVideo(videos);
 }

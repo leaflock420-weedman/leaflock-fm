@@ -2,6 +2,7 @@ import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import FmScheduleSection from "@/components/FmScheduleSection";
 import InstallPrompt from "@/components/InstallPrompt";
 import FmDeskPanel from "@/components/FmDeskPanel";
+import JukeboxForm from "@/components/JukeboxForm";
 import TopLovedTracks from "@/components/TopLovedTracks";
 
 export default function FMPage() {
@@ -13,6 +14,8 @@ export default function FMPage() {
         <TopLovedTracks />
 
         <FmScheduleSection />
+
+        <JukeboxForm />
       </div>
 
       <div className="mx-auto mt-8 max-w-2xl text-center text-xs text-zinc-500 sm:mt-12 sm:text-sm">

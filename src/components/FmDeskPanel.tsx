@@ -7,7 +7,13 @@ import {
   FM_PLAYLIST_LABELS,
   type FmPlaylistKey
 } from "@/lib/fm-playlists";
-import type { FmDeskSettings } from "@/lib/fm-store";
+import type {
+  FmDeskSettings,
+  JukeboxSuggestion,
+  LiveListener,
+  OwnerQueueItem,
+  TrackRequest
+} from "@/lib/fm-store";
 
 type TrackLike = {
   trackId: string;
@@ -19,6 +25,10 @@ type TrackLike = {
 type DeskPayload = {
   settings: FmDeskSettings;
   topLikes: TrackLike[];
+  jukebox: JukeboxSuggestion[];
+  listeners: LiveListener[];
+  requests: TrackRequest[];
+  ownerQueue: OwnerQueueItem[];
 };
 
 const STORAGE_KEY = "leaflock-fm-desk-key";
@@ -39,6 +49,8 @@ export default function FmDeskPanel() {
   const [data, setData] = useState<DeskPayload | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [queueUrl, setQueueUrl] = useState("");
+  const [queueTitle, setQueueTitle] = useState("");
 
   useEffect(() => {
     const stored = sessionStorage.getItem(STORAGE_KEY);
@@ -120,7 +132,58 @@ export default function FmDeskPanel() {
 
     const payload = (await response.json()) as { settings: FmDeskSettings };
     setSettings(payload.settings);
-    setMessage("Saved. Shuffle tab uses Main Rotation. Listeners never see this desk.");
+    setMessage("Saved. Main rotation updates on the next listener refresh.");
+  }
+
+  async function queueTrackNow(event: React.FormEvent) {
+    event.preventDefault();
+    if (!savedKey) return;
+
+    setMessage(null);
+    setError(null);
+
+    const response = await fetch("/api/fm/desk", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-fm-desk-key": savedKey
+      },
+      body: JSON.stringify({
+        action: "queue-track",
+        youtubeUrl: queueUrl,
+        title: queueTitle
+      })
+    });
+
+    const payload = (await response.json()) as { error?: string };
+    if (!response.ok) {
+      setError(payload.error ?? "Could not queue track.");
+      return;
+    }
+
+    setQueueUrl("");
+    setQueueTitle("");
+    setMessage("Track queued — plays at the next transition without interrupting playback.");
+    await loadDesk(savedKey, true);
+  }
+
+  async function skipJukeboxItem(id: string) {
+    if (!savedKey) return;
+
+    await fetch("/api/fm/desk", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-fm-desk-key": savedKey
+      },
+      body: JSON.stringify({
+        action: "jukebox-status",
+        jukeboxId: id,
+        jukeboxStatus: "skipped"
+      })
+    });
+
+    await loadDesk(savedKey, true);
   }
 
   async function emailLoved() {
@@ -212,7 +275,7 @@ export default function FmDeskPanel() {
         <div className="mb-4 flex items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold">Private desk</h2>
-            <p className="text-xs text-zinc-500">Shuffle tab = Main Rotation only.</p>
+            <p className="text-xs text-zinc-500">Live control room — hidden from listeners.</p>
           </div>
           <div className="flex gap-2">
             <button
@@ -237,7 +300,7 @@ export default function FmDeskPanel() {
               <label key={key} className="block text-sm text-zinc-300">
                 {FM_PLAYLIST_LABELS[key]}
                 {key === "mainRotation" ? (
-                  <span className="ml-2 text-xs text-emerald-400">← Shuffle tab</span>
+                  <span className="ml-2 text-xs text-emerald-400">← Now playing</span>
                 ) : null}
                 <input
                   value={settings.playlists[key]}
@@ -304,6 +367,99 @@ export default function FmDeskPanel() {
           <Mail className="h-4 w-4" />
           Email me most loved tracks
         </button>
+
+        <form onSubmit={queueTrackNow} className="mt-6 space-y-3 border-t border-zinc-800 pt-5">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">
+            Add to queue now
+          </h3>
+          <input
+            value={queueUrl}
+            onChange={(event) => setQueueUrl(event.target.value)}
+            placeholder="YouTube link or video ID"
+            className="w-full rounded-xl border border-zinc-700 bg-black px-4 py-3 text-base"
+          />
+          <input
+            value={queueTitle}
+            onChange={(event) => setQueueTitle(event.target.value)}
+            placeholder="Track title (optional)"
+            className="w-full rounded-xl border border-zinc-700 bg-black px-4 py-3 text-base"
+          />
+          <button
+            type="submit"
+            className="w-full rounded-full border border-emerald-500/40 px-5 py-3 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/10"
+          >
+            Queue for next transition
+          </button>
+        </form>
+
+        <section className="mt-6 border-t border-zinc-800 pt-5">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">
+            Listening live
+          </h3>
+          <ul className="mt-3 space-y-2 text-sm">
+            {data.listeners.length === 0 ? (
+              <li className="text-zinc-500">No listeners in the last 2 minutes.</li>
+            ) : (
+              data.listeners.map((listener) => (
+                <li key={listener.id} className="flex items-center justify-between gap-3">
+                  <span className="truncate">
+                    {listener.instagram ? `@${listener.instagram.replace(/^@/, "")}` : "Anonymous listener"}
+                  </span>
+                  <span className="shrink-0 text-xs text-zinc-500">live</span>
+                </li>
+              ))
+            )}
+          </ul>
+        </section>
+
+        <section className="mt-6 border-t border-zinc-800 pt-5">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">
+            Jukebox pending
+          </h3>
+          <ul className="mt-3 space-y-2 text-sm">
+            {data.jukebox.length === 0 ? (
+              <li className="text-zinc-500">No jukebox suggestions waiting.</li>
+            ) : (
+              data.jukebox.slice(0, 8).map((item) => (
+                <li key={item.id} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{item.title}</p>
+                    {item.instagram ? (
+                      <p className="text-xs text-zinc-500">@{item.instagram.replace(/^@/, "")}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void skipJukeboxItem(item.id)}
+                    className="shrink-0 text-xs text-zinc-500 hover:text-amber-300"
+                  >
+                    Skip
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+        </section>
+
+        <section className="mt-6 border-t border-zinc-800 pt-5">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">
+            Recent requests
+          </h3>
+          <ul className="mt-3 space-y-2 text-sm">
+            {data.requests.length === 0 ? (
+              <li className="text-zinc-500">No requests yet.</li>
+            ) : (
+              data.requests.slice(0, 6).map((request) => (
+                <li key={request.id}>
+                  {request.trackTitle ? (
+                    <p className="font-medium">{request.trackTitle}</p>
+                  ) : null}
+                  <p className="text-zinc-400">{request.message}</p>
+                </li>
+              ))
+            )}
+          </ul>
+        </section>
 
         <section className="mt-6 border-t border-zinc-800 pt-5">
           <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">Most loved</h3>

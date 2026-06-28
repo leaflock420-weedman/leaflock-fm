@@ -26,7 +26,8 @@ export async function POST(request: Request) {
     source: body.source === "stream" ? "stream" : "playlist"
   });
 
-  if (process.env.FM_EMAIL_ON_LIKE === "true") {
+  const emailOnLike = process.env.FM_EMAIL_ON_LIKE !== "false";
+  if (emailOnLike) {
     void emailTrackLove(like);
   }
 

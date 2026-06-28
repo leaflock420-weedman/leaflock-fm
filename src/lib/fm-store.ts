@@ -13,6 +13,12 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const SETTINGS_PATH = path.join(DATA_DIR, "fm-settings.json");
 const LIKES_PATH = path.join(DATA_DIR, "track-likes.json");
 const REQUESTS_PATH = path.join(DATA_DIR, "track-requests.json");
+const JUKEBOX_PATH = path.join(DATA_DIR, "jukebox-suggestions.json");
+const LISTENERS_PATH = path.join(DATA_DIR, "live-listeners.json");
+const OWNER_QUEUE_PATH = path.join(DATA_DIR, "owner-queue.json");
+
+export const JUKEBOX_AUTO_INTERVAL_MS = 15 * 60 * 1000;
+export const LISTENER_TTL_MS = 2 * 60 * 1000;
 
 export type FmDeskSettings = {
   playlists: FmPlaylists;
@@ -20,6 +26,7 @@ export type FmDeskSettings = {
   youtubeChannelId: string;
   ownerEmail: string;
   schedule: FmScheduleItem[];
+  runtime: FmRuntimeState;
   updatedAt: string;
 };
 
@@ -46,8 +53,43 @@ export type TrackRequest = {
   emailed: boolean;
 };
 
+export type JukeboxSuggestion = {
+  id: string;
+  videoId: string;
+  title: string;
+  suggestedBy?: string;
+  instagram?: string;
+  createdAt: string;
+  status: "pending" | "played" | "skipped";
+  playedAt?: string;
+};
+
+export type LiveListener = {
+  id: string;
+  displayName?: string;
+  instagram?: string;
+  lastSeenAt: string;
+};
+
+export type OwnerQueueItem = {
+  id: string;
+  videoId: string;
+  title: string;
+  createdAt: string;
+  status: "pending" | "played";
+  playedAt?: string;
+};
+
+export type FmRuntimeState = {
+  lastAutoJukeboxAt: string | null;
+};
+
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
+}
+
+function emptyRuntimeState(): FmRuntimeState {
+  return { lastAutoJukeboxAt: null };
 }
 
 function emptyDeskSettings(): FmDeskSettings {
@@ -57,6 +99,7 @@ function emptyDeskSettings(): FmDeskSettings {
     youtubeChannelId: process.env.NEXT_PUBLIC_YOUTUBE_CHANNEL_ID?.trim() ?? "",
     ownerEmail: process.env.FM_OWNER_EMAIL?.trim() ?? "",
     schedule: defaultSchedule(),
+    runtime: emptyRuntimeState(),
     updatedAt: new Date().toISOString()
   };
 }
@@ -104,6 +147,13 @@ function migrateLegacySettings(raw: Record<string, unknown>): FmDeskSettings {
   }
   if (Array.isArray(raw.schedule)) {
     base.schedule = raw.schedule as FmScheduleItem[];
+  }
+  if (raw.runtime && typeof raw.runtime === "object") {
+    const runtime = raw.runtime as Partial<FmRuntimeState>;
+    base.runtime = {
+      lastAutoJukeboxAt:
+        typeof runtime.lastAutoJukeboxAt === "string" ? runtime.lastAutoJukeboxAt : null
+    };
   }
   if (typeof raw.updatedAt === "string") {
     base.updatedAt = raw.updatedAt;
@@ -172,6 +222,7 @@ export async function saveFmDeskSettings(
     youtubeChannelId: input.youtubeChannelId?.trim() ?? current.youtubeChannelId,
     ownerEmail: input.ownerEmail?.trim() ?? current.ownerEmail,
     schedule: input.schedule ?? current.schedule,
+    runtime: input.runtime ?? current.runtime ?? emptyRuntimeState(),
     updatedAt: new Date().toISOString()
   };
 
@@ -259,6 +310,184 @@ export async function getTopLikes(limit = 10): Promise<TrackLike[]> {
   } catch {
     return [];
   }
+}
+
+async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonFile<T>(filePath: string, value: T) {
+  await ensureDataDir();
+  await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+export async function recordJukeboxSuggestion(input: {
+  videoId: string;
+  title: string;
+  suggestedBy?: string;
+  instagram?: string;
+}): Promise<JukeboxSuggestion> {
+  const suggestions = await readJsonFile<JukeboxSuggestion[]>(JUKEBOX_PATH, []);
+  const entry: JukeboxSuggestion = {
+    id: `juke_${Date.now()}`,
+    videoId: input.videoId.trim(),
+    title: input.title.trim() || "Jukebox suggestion",
+    suggestedBy: input.suggestedBy?.trim(),
+    instagram: input.instagram?.trim(),
+    createdAt: new Date().toISOString(),
+    status: "pending"
+  };
+
+  suggestions.unshift(entry);
+  await writeJsonFile(JUKEBOX_PATH, suggestions.slice(0, 200));
+  return entry;
+}
+
+export async function getJukeboxSuggestions(status?: JukeboxSuggestion["status"]) {
+  const suggestions = await readJsonFile<JukeboxSuggestion[]>(JUKEBOX_PATH, []);
+  return status ? suggestions.filter((item) => item.status === status) : suggestions;
+}
+
+export async function updateJukeboxSuggestion(
+  id: string,
+  status: JukeboxSuggestion["status"]
+): Promise<JukeboxSuggestion | null> {
+  const suggestions = await readJsonFile<JukeboxSuggestion[]>(JUKEBOX_PATH, []);
+  const index = suggestions.findIndex((item) => item.id === id);
+  if (index < 0) return null;
+
+  suggestions[index] = {
+    ...suggestions[index],
+    status,
+    playedAt: status === "played" ? new Date().toISOString() : suggestions[index].playedAt
+  };
+  await writeJsonFile(JUKEBOX_PATH, suggestions);
+  return suggestions[index];
+}
+
+export async function recordListenerHeartbeat(input: {
+  listenerId: string;
+  displayName?: string;
+  instagram?: string;
+}): Promise<LiveListener> {
+  const listeners = await readJsonFile<LiveListener[]>(LISTENERS_PATH, []);
+  const now = new Date().toISOString();
+  const existingIndex = listeners.findIndex((item) => item.id === input.listenerId);
+  const entry: LiveListener = {
+    id: input.listenerId,
+    displayName: input.displayName?.trim(),
+    instagram: input.instagram?.trim(),
+    lastSeenAt: now
+  };
+
+  if (existingIndex >= 0) {
+    listeners[existingIndex] = entry;
+  } else {
+    listeners.unshift(entry);
+  }
+
+  const fresh = listeners.filter(
+    (item) => Date.now() - new Date(item.lastSeenAt).getTime() <= LISTENER_TTL_MS
+  );
+  await writeJsonFile(LISTENERS_PATH, fresh.slice(0, 100));
+  return entry;
+}
+
+export async function getLiveListeners(): Promise<LiveListener[]> {
+  const listeners = await readJsonFile<LiveListener[]>(LISTENERS_PATH, []);
+  return listeners
+    .filter((item) => Date.now() - new Date(item.lastSeenAt).getTime() <= LISTENER_TTL_MS)
+    .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+}
+
+export async function getTrackRequests(limit = 20): Promise<TrackRequest[]> {
+  const requests = await readJsonFile<TrackRequest[]>(REQUESTS_PATH, []);
+  return requests.slice(0, limit);
+}
+
+export async function addOwnerQueueItem(input: {
+  videoId: string;
+  title: string;
+}): Promise<OwnerQueueItem> {
+  const queue = await readJsonFile<OwnerQueueItem[]>(OWNER_QUEUE_PATH, []);
+  const entry: OwnerQueueItem = {
+    id: `own_${Date.now()}`,
+    videoId: input.videoId.trim(),
+    title: input.title.trim() || "Queued track",
+    createdAt: new Date().toISOString(),
+    status: "pending"
+  };
+
+  queue.unshift(entry);
+  await writeJsonFile(OWNER_QUEUE_PATH, queue.slice(0, 100));
+  return entry;
+}
+
+export async function getOwnerQueue(): Promise<OwnerQueueItem[]> {
+  return readJsonFile<OwnerQueueItem[]>(OWNER_QUEUE_PATH, []);
+}
+
+export type PlayerInject = {
+  source: "owner" | "jukebox";
+  id: string;
+  videoId: string;
+  title: string;
+};
+
+export async function peekPlayerInject(): Promise<PlayerInject | null> {
+  const ownerQueue = await getOwnerQueue();
+  const ownerItem = ownerQueue.find((item) => item.status === "pending");
+  if (ownerItem) {
+    return {
+      source: "owner",
+      id: ownerItem.id,
+      videoId: ownerItem.videoId,
+      title: ownerItem.title
+    };
+  }
+
+  const settings = await getFmDeskSettings();
+  const lastAt = settings.runtime.lastAutoJukeboxAt
+    ? new Date(settings.runtime.lastAutoJukeboxAt).getTime()
+    : 0;
+  const due = Date.now() - lastAt >= JUKEBOX_AUTO_INTERVAL_MS;
+  if (!due) return null;
+
+  const pending = await getJukeboxSuggestions("pending");
+  if (pending.length === 0) return null;
+
+  const pick = pending[Math.floor(Math.random() * pending.length)];
+  return {
+    source: "jukebox",
+    id: pick.id,
+    videoId: pick.videoId,
+    title: pick.title
+  };
+}
+
+export async function acknowledgePlayerInject(inject: PlayerInject) {
+  if (inject.source === "owner") {
+    const queue = await getOwnerQueue();
+    const index = queue.findIndex((item) => item.id === inject.id);
+    if (index >= 0) {
+      queue[index] = {
+        ...queue[index],
+        status: "played",
+        playedAt: new Date().toISOString()
+      };
+      await writeJsonFile(OWNER_QUEUE_PATH, queue);
+    }
+    return;
+  }
+
+  await updateJukeboxSuggestion(inject.id, "played");
+  await saveFmDeskSettings({
+    runtime: { lastAutoJukeboxAt: new Date().toISOString() }
+  });
 }
 
 export function verifyFmDeskAccess(request: Request) {
