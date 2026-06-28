@@ -1664,7 +1664,7 @@ export default function LeafLockPlayer({
                 <button
                   type="button"
                   onClick={handlePrevious}
-                  disabled={isBuffering || !canGoPrevious}
+                  disabled={listenMode === "live" || isBuffering || !canGoPrevious}
                   className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900 text-zinc-200 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-35 touch-manipulation"
                   aria-label="Previous track"
                 >
@@ -1688,7 +1688,7 @@ export default function LeafLockPlayer({
                 <button
                   type="button"
                   onClick={handleNext}
-                  disabled={isBlending}
+                  disabled={listenMode === "live" || isBlending}
                   className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900 text-zinc-200 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-35 touch-manipulation"
                   aria-label="Next track"
                 >
