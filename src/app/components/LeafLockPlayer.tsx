@@ -207,15 +207,34 @@ function youtubeArtwork(videoId: string | null): MediaImage[] {
   ];
 }
 
+export type ListenMode = "live" | "solo";
+
 type LeafLockPlayerProps = {
   /** simple = main song playlist only, no schedule switching */
   mode?: FmPlayerMode;
+  listenMode?: ListenMode;
   subtitle?: string;
   hideLogo?: boolean;
 };
 
+type PublicStationPayload = {
+  revision: number;
+  current: {
+    videoId: string;
+    title: string;
+    artist?: string;
+    durationSec?: number;
+    requestCredit?: string | null;
+  };
+  offsetSeconds: number;
+  upNext: string | null;
+  requestCredit: string | null;
+  listenerCount?: number;
+};
+
 export default function LeafLockPlayer({
   mode = "simple",
+  listenMode = "solo",
   subtitle,
   hideLogo = false
 }: LeafLockPlayerProps) {
@@ -247,8 +266,10 @@ export default function LeafLockPlayer({
   const [controlsOffscreen, setControlsOffscreen] = useState(false);
   const [portalReady, setPortalReady] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
+  const [videoDisplayReady, setVideoDisplayReady] = useState(false);
   const [activeDeck, setActiveDeck] = useState<DeckId>("a");
   const [requestCredit, setRequestCredit] = useState<string | null>(null);
+  const [liveRoomLabel, setLiveRoomLabel] = useState<string | null>(null);
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const videoShellRef = useRef<HTMLDivElement | null>(null);
@@ -280,6 +301,9 @@ export default function LeafLockPlayer({
   const pendingInjectRef = useRef<PlayerInject | null>(null);
   const requestFlowRef = useRef<RequestFlowContext | null>(null);
   const outsidePlaylistAllowedRef = useRef<string | null>(null);
+  const showVideoRef = useRef(false);
+  const stationRevisionRef = useRef(-1);
+  const listenModeRef = useRef(listenMode);
 
   const syncPreviousState = useCallback(() => {
     setCanGoPrevious(sessionIndexRef.current > 0);
@@ -441,6 +465,9 @@ export default function LeafLockPlayer({
     currentVideoIdRef.current = video.id;
     setCurrentTrackId(video.id);
     setNowPlaying({ title: video.title, artist });
+    if (showVideoRef.current) {
+      setVideoDisplayReady(true);
+    }
     bindMediaSessionRef.current();
     updateMediaSessionRef.current(isPlayingRef.current);
   }, []);
@@ -826,6 +853,7 @@ export default function LeafLockPlayer({
   }, [cancelActiveCrossfade, playInstantOnActiveDeck, syncPreviousState]);
 
   const checkForUpcomingBlend = useCallback(() => {
+    if (listenModeRef.current === "live") return;
     if (!blendEnabledRef.current || blendInProgressRef.current || !isPlayingRef.current) return;
 
     const player = getActivePlayer();
@@ -864,6 +892,8 @@ export default function LeafLockPlayer({
   const syncPlaybackProgressRef = useRef(syncPlaybackProgress);
   const prefetchOnInactiveDeckRef = useRef(prefetchOnInactiveDeck);
   const peekNextScheduledTrackRef = useRef(peekNextScheduledTrack);
+  const applyLiveStationTrackRef =
+    useRef<(station: PublicStationPayload, options?: { forceReload?: boolean }) => void>(() => {});
   const startTimePollingRef = useRef(startTimePolling);
   const stopTimePollingRef = useRef(stopTimePolling);
 
@@ -890,6 +920,20 @@ export default function LeafLockPlayer({
   }, [djBlendEnabled]);
 
   useEffect(() => {
+    showVideoRef.current = showVideo;
+  }, [showVideo]);
+
+  useEffect(() => {
+    listenModeRef.current = listenMode;
+    if (listenMode === "live") {
+      setLiveRoomLabel("Live room — synced with everyone");
+      stationRevisionRef.current = -1;
+    } else {
+      setLiveRoomLabel(null);
+    }
+  }, [listenMode]);
+
+  useEffect(() => {
     volumeRef.current = volume;
     if (!blendInProgressRef.current) {
       applyDeckVolume(activeDeckRef.current, 1);
@@ -898,21 +942,21 @@ export default function LeafLockPlayer({
 
   const resizePlayerHosts = useCallback(() => {
     const shell = videoShellRef.current;
-    const width = showVideo && shell ? shell.clientWidth : 2;
-    const height = showVideo && shell ? shell.clientHeight : 2;
+    const width = showVideo && videoDisplayReady && shell ? shell.clientWidth : 2;
+    const height = showVideo && videoDisplayReady && shell ? shell.clientHeight : 2;
 
     (["a", "b"] as DeckId[]).forEach((deck) => {
       playersRef.current[deck]?.setSize(width, height);
     });
-  }, [showVideo]);
+  }, [showVideo, videoDisplayReady]);
 
   useEffect(() => {
     if (!playersReady) return;
     resizePlayerHosts();
-  }, [playersReady, resizePlayerHosts, showVideo, activeDeck, isBlending]);
+  }, [playersReady, resizePlayerHosts, showVideo, videoDisplayReady, activeDeck, isBlending]);
 
   useEffect(() => {
-    if (!showVideo) return;
+    if (!showVideo || !videoDisplayReady) return;
 
     const shell = videoShellRef.current;
     if (!shell || typeof ResizeObserver === "undefined") return;
@@ -922,47 +966,67 @@ export default function LeafLockPlayer({
     });
     observer.observe(shell);
     return () => observer.disconnect();
-  }, [showVideo, resizePlayerHosts]);
+  }, [showVideo, videoDisplayReady, resizePlayerHosts]);
 
-  const syncActiveDeckVideo = useCallback(() => {
-    const videoId = currentVideoIdRef.current;
-    const deck = activeDeckRef.current;
-    const inactiveDeck = deck === "a" ? "b" : "a";
-    const player = getDeckPlayer(deck);
-    const inactivePlayer = getDeckPlayer(inactiveDeck);
-    if (!videoId || !player || !playersReadyRef.current[deck]) return;
+  const applyLiveStationTrack = useCallback(
+    (station: PublicStationPayload, options?: { forceReload?: boolean }) => {
+      const player = getActivePlayer();
+      if (!player || !playersReadyRef.current[activeDeckRef.current]) return;
 
-    let resumeTime = 0;
-    try {
-      resumeTime = player.getCurrentTime();
-      if (!Number.isFinite(resumeTime) || resumeTime < 0) {
-        resumeTime = currentTime;
+      const track = station.current;
+      const changed =
+        options?.forceReload ||
+        station.revision !== stationRevisionRef.current ||
+        currentVideoIdRef.current !== track.videoId;
+
+      stationRevisionRef.current = station.revision;
+      outsidePlaylistAllowedRef.current = track.videoId;
+      setRequestCredit(station.requestCredit);
+      setUpNext(station.upNext);
+      setLiveRoomLabel(
+        station.listenerCount && station.listenerCount > 0
+          ? `Live room — ${station.listenerCount} listening`
+          : "Live room — synced with everyone"
+      );
+
+      const video: PlaylistVideo = {
+        id: track.videoId,
+        title: track.title,
+        channelTitle: track.artist,
+        durationSec: track.durationSec
+      };
+
+      if (changed) {
+        setTrackUi(video, track.artist ?? "LeafLock FM");
+        player.loadVideoById(track.videoId);
+        deckVideoIdRef.current[activeDeckRef.current] = track.videoId;
       }
-    } catch {
-      resumeTime = currentTime;
-    }
 
-    inactivePlayer?.pauseVideo();
+      if (station.offsetSeconds > 0.5) {
+        try {
+          player.seekTo(station.offsetSeconds, true);
+        } catch {
+          // Player may not be ready to seek yet.
+        }
+      }
 
-    player.loadVideoById(videoId);
-    deckVideoIdRef.current[deck] = videoId;
+      if (isPlayingRef.current || changed) {
+        player.playVideo();
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+        setIsConnected(true);
+        applyDeckVolume(activeDeckRef.current, 1);
+        startTimePollingRef.current();
+      }
 
-    if (resumeTime > 0.5) {
-      player.seekTo(resumeTime, true);
-    }
-
-    if (isPlayingRef.current) {
-      player.playVideo();
-    }
-
-    applyDeckVolume(deck, 1);
-    window.setTimeout(() => resizePlayerHosts(), 50);
-  }, [applyDeckVolume, currentTime, getDeckPlayer, resizePlayerHosts]);
+      window.setTimeout(() => resizePlayerHosts(), 50);
+    },
+    [applyDeckVolume, getActivePlayer, resizePlayerHosts, setTrackUi]
+  );
 
   useEffect(() => {
-    if (!showVideo || !playersReady) return;
-    syncActiveDeckVideo();
-  }, [showVideo, playersReady, syncActiveDeckVideo, currentTrackId, activeDeck]);
+    applyLiveStationTrackRef.current = applyLiveStationTrack;
+  }, [applyLiveStationTrack]);
 
   const resumeBackgroundPlayback = useCallback(() => {
     if (!isPlayingRef.current) return;
@@ -1003,7 +1067,42 @@ export default function LeafLockPlayer({
   }, [resumeBackgroundPlayback]);
 
   useEffect(() => {
-    if (!playlistReady) return;
+    if (listenMode !== "live" || !playlistReady || !playersReady) return;
+
+    const syncStation = async () => {
+      try {
+        const response = await fetch("/api/fm/station", { cache: "no-store" });
+        const station = (await response.json()) as PublicStationPayload;
+        if (!station.current?.videoId) return;
+
+        const player = getActivePlayer();
+        if (!player) return;
+
+        const drift =
+          station.revision === stationRevisionRef.current
+            ? Math.abs((player.getCurrentTime?.() ?? 0) - station.offsetSeconds)
+            : 999;
+
+        if (station.revision !== stationRevisionRef.current || drift > 5) {
+          applyLiveStationTrack(station, {
+            forceReload: station.revision !== stationRevisionRef.current
+          });
+        }
+      } catch {
+        // Ignore station sync errors.
+      }
+    };
+
+    void syncStation();
+    const intervalId = window.setInterval(() => {
+      void syncStation();
+    }, 4000);
+
+    return () => window.clearInterval(intervalId);
+  }, [applyLiveStationTrack, getActivePlayer, listenMode, playlistReady, playersReady]);
+
+  useEffect(() => {
+    if (listenMode !== "solo" || !playlistReady) return;
 
     const pollInject = async () => {
       try {
@@ -1022,7 +1121,7 @@ export default function LeafLockPlayer({
     }, 45_000);
 
     return () => window.clearInterval(intervalId);
-  }, [playlistReady, refreshUpNextLabel]);
+  }, [listenMode, playlistReady, refreshUpNextLabel]);
 
   useEffect(() => {
     const mobile =
@@ -1171,9 +1270,11 @@ export default function LeafLockPlayer({
                   syncPlaybackProgressRef.current();
                   startTimePollingRef.current();
 
-                  const upcoming = peekNextScheduledTrackRef.current();
-                  if (upcoming) {
-                    prefetchOnInactiveDeckRef.current(upcoming);
+                  if (listenModeRef.current !== "live") {
+                    const upcoming = peekNextScheduledTrackRef.current();
+                    if (upcoming) {
+                      prefetchOnInactiveDeckRef.current(upcoming);
+                    }
                   }
                 }
               }
@@ -1196,7 +1297,18 @@ export default function LeafLockPlayer({
 
               if (event.data === YT.PlayerState.ENDED) {
                 if (deck === activeDeckRef.current && !blendInProgressRef.current) {
-                  playNextTrackAutoRef.current();
+                  if (listenModeRef.current === "live") {
+                    void fetch("/api/fm/station", { cache: "no-store" })
+                      .then((response) => response.json())
+                      .then((station: PublicStationPayload) => {
+                        applyLiveStationTrackRef.current(station, { forceReload: true });
+                      })
+                      .catch(() => {
+                        // Station poll will recover on next interval.
+                      });
+                  } else {
+                    playNextTrackAutoRef.current();
+                  }
                 }
               }
             },
@@ -1323,6 +1435,18 @@ export default function LeafLockPlayer({
     void syncMediaBridge(true);
     bindMediaSession();
 
+    if (listenModeRef.current === "live") {
+      void fetch("/api/fm/station", { cache: "no-store" })
+        .then((response) => response.json())
+        .then((station: PublicStationPayload) => {
+          applyLiveStationTrackRef.current(station, { forceReload: true });
+        })
+        .catch(() => {
+          setPlaybackError("Could not join the live room. Try again.");
+        });
+      return;
+    }
+
     if (currentVideoIdRef.current) {
       player.playVideo();
       applyDeckVolume(activeDeckRef.current, 1);
@@ -1338,12 +1462,12 @@ export default function LeafLockPlayer({
   };
 
   const handlePrevious = () => {
-    if (!playersReady || !canGoPrevious) return;
+    if (listenMode === "live" || !playersReady || !canGoPrevious) return;
     playPreviousTrackFromGesture();
   };
 
   const handleNext = () => {
-    if (!playersReady) return;
+    if (listenMode === "live" || !playersReady) return;
     playNextTrackFromGesture();
   };
 
@@ -1453,10 +1577,15 @@ export default function LeafLockPlayer({
   const toggleVideo = () => {
     setShowVideo((current) => {
       const next = !current;
-      try {
-        window.localStorage.setItem(SHOW_VIDEO_KEY, next ? "1" : "0");
-      } catch {
-        // Ignore storage errors.
+      if (!next) {
+        setVideoDisplayReady(false);
+      } else {
+        const deck = activeDeckRef.current;
+        const canShowNow =
+          Boolean(currentVideoIdRef.current) &&
+          deckVideoIdRef.current[deck] === currentVideoIdRef.current;
+        setVideoDisplayReady(canShowNow);
+        window.setTimeout(() => resizePlayerHosts(), 80);
       }
       return next;
     });
@@ -1601,7 +1730,9 @@ export default function LeafLockPlayer({
               </span>
             </div>
             <h1 className="mt-1 text-xl font-semibold tracking-tight text-white sm:text-3xl">FM 104.2</h1>
-            <p className="mt-0.5 text-sm text-zinc-400">{subtitle ?? "Stay Locked"}</p>
+            <p className="mt-0.5 text-sm text-zinc-400">
+              {listenMode === "live" ? (liveRoomLabel ?? "Live room — synced") : (subtitle ?? "Stay Locked")}
+            </p>
           </div>
 
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
@@ -1652,6 +1783,9 @@ export default function LeafLockPlayer({
             Requested by {requestCredit}
           </p>
         ) : null}
+        {showVideo && !videoDisplayReady ? (
+          <p className="mt-2 text-xs text-zinc-500">Video starts on the next track</p>
+        ) : null}
         {upNext ? (
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-amber-400/80">
             Up next: {upNext}
@@ -1670,16 +1804,16 @@ export default function LeafLockPlayer({
       <div
         ref={videoShellRef}
         className={
-          showVideo
+          showVideo && videoDisplayReady
             ? "relative mb-5 aspect-video w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black sm:mb-6"
             : "pointer-events-none absolute left-0 top-0 h-[2px] w-[2px] overflow-hidden opacity-[0.01]"
         }
-        aria-hidden={!showVideo}
+        aria-hidden={!showVideo || !videoDisplayReady}
       >
         <div
           ref={playerHostARef}
           className={
-            showVideo
+            showVideo && videoDisplayReady
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "a" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
@@ -1689,7 +1823,7 @@ export default function LeafLockPlayer({
         <div
           ref={playerHostBRef}
           className={
-            showVideo
+            showVideo && videoDisplayReady
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "b" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
@@ -1735,7 +1869,7 @@ export default function LeafLockPlayer({
           <button
             type="button"
             onClick={handlePrevious}
-            disabled={isLoadingPlaylist || isBuffering || !canGoPrevious}
+            disabled={listenMode === "live" || isLoadingPlaylist || isBuffering || !canGoPrevious}
             className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Previous track"
           >
@@ -1761,7 +1895,7 @@ export default function LeafLockPlayer({
           <button
             type="button"
             onClick={handleNext}
-            disabled={isLoadingPlaylist || isBlending}
+            disabled={isLoadingPlaylist || isBlending || listenMode === "live"}
             className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Next track"
           >

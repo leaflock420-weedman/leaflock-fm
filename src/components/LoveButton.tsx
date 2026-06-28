@@ -35,6 +35,7 @@ export default function LoveButton({ trackId, title, artist, source }: LoveButto
       const payload = (await response.json()) as { like?: { count?: number } };
       setLiked(true);
       setCount(payload.like?.count ?? null);
+      window.dispatchEvent(new Event("leaflock:loved"));
     } finally {
       setIsSaving(false);
     }

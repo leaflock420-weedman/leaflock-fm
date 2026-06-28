@@ -1,5 +1,5 @@
 import { sendOwnerEmail } from "@/lib/fm-email";
-import { recordJukeboxSuggestion } from "@/lib/fm-store";
+import { appendActivityLog, recordJukeboxSuggestion } from "@/lib/fm-store";
 import { parseYouTubeVideoId } from "@/lib/youtube-url";
 
 export async function POST(request: Request) {
@@ -17,6 +17,13 @@ export async function POST(request: Request) {
   if (!videoId) {
     return Response.json({ error: "Paste a valid YouTube link or video ID" }, { status: 400 });
   }
+
+  void appendActivityLog({
+    type: "jukebox",
+    instagram: body.instagram,
+    summary: `Jukebox: ${body.title?.trim() || videoId}`,
+    details: { videoId, suggestedBy: body.suggestedBy ?? null }
+  });
 
   const entry = await recordJukeboxSuggestion({
     videoId,

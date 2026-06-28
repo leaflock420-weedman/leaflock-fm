@@ -15,7 +15,11 @@ function getListenerId() {
   return created;
 }
 
-export default function JukeboxForm() {
+type JukeboxFormProps = {
+  sharedRoom?: boolean;
+};
+
+export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [instagram, setInstagram] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -105,8 +109,9 @@ export default function JukeboxForm() {
         Jukebox
       </div>
       <p className="mt-2 text-sm text-zinc-400">
-        Suggest a YouTube track. When the DJ is away, one random suggestion may play every 15
-        minutes.
+        {sharedRoom
+          ? "Suggest a track for the live room — everyone tuned in hears it together. One random suggestion may auto-play every 15 minutes."
+          : "Suggest a YouTube track for your private jukebox. One random suggestion may play every 15 minutes."}
       </p>
       <div className="mt-4 space-y-3">
         <input

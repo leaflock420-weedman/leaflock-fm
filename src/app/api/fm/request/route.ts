@@ -1,5 +1,5 @@
 import { sendOwnerEmail } from "@/lib/fm-email";
-import { recordTrackRequest } from "@/lib/fm-store";
+import { appendActivityLog, recordTrackRequest } from "@/lib/fm-store";
 
 export async function POST(request: Request) {
   const body = (await request.json()) as {
@@ -11,6 +11,12 @@ export async function POST(request: Request) {
   if (!message || message.length < 3) {
     return Response.json({ error: "message is required" }, { status: 400 });
   }
+
+  void appendActivityLog({
+    type: "request",
+    summary: `Request: ${body.trackTitle?.trim() || message.slice(0, 80)}`,
+    details: { message }
+  });
 
   const entry = await recordTrackRequest(message, body.trackTitle);
 

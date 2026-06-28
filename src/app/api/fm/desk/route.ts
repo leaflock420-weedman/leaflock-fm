@@ -1,6 +1,8 @@
 import { emailTopLovedDigest } from "@/lib/fm-email";
 import {
   addOwnerQueueItem,
+  appendActivityLog,
+  getActivityLog,
   getFmDeskSettings,
   getJukeboxSuggestions,
   getLiveListeners,
@@ -20,16 +22,26 @@ export async function GET(request: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const [settings, topLikes, jukebox, listeners, requests, ownerQueue] = await Promise.all([
-    getFmDeskSettings(),
-    getTopLikes(25),
-    getJukeboxSuggestions("pending"),
-    getLiveListeners(),
-    getTrackRequests(15),
-    getOwnerQueue()
-  ]);
+  const [settings, topLikes, jukebox, listeners, requests, ownerQueue, activityLog] =
+    await Promise.all([
+      getFmDeskSettings(),
+      getTopLikes(25),
+      getJukeboxSuggestions("pending"),
+      getLiveListeners(),
+      getTrackRequests(15),
+      getOwnerQueue(),
+      getActivityLog(80)
+    ]);
 
-  return Response.json({ settings, topLikes, jukebox, listeners, requests, ownerQueue });
+  return Response.json({
+    settings,
+    topLikes,
+    jukebox,
+    listeners,
+    requests,
+    ownerQueue,
+    activityLog
+  });
 }
 
 export async function PUT(request: Request) {
@@ -55,6 +67,12 @@ export async function PUT(request: Request) {
     youtubeChannelId: body.youtubeChannelId,
     ownerEmail: body.ownerEmail,
     schedule: body.schedule
+  });
+
+  void appendActivityLog({
+    type: "desk_save",
+    summary: "Desk settings saved",
+    details: { mainRotation: settings.playlists.mainRotation }
   });
 
   return Response.json({ settings });
@@ -89,6 +107,11 @@ export async function POST(request: Request) {
     const item = await addOwnerQueueItem({
       videoId,
       title: body.title?.trim() || `Queued track ${videoId}`
+    });
+    void appendActivityLog({
+      type: "desk_queue",
+      summary: `Queued: ${item.title}`,
+      details: { videoId: item.videoId }
     });
     return Response.json({ item });
   }

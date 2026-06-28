@@ -16,6 +16,25 @@ const REQUESTS_PATH = path.join(DATA_DIR, "track-requests.json");
 const JUKEBOX_PATH = path.join(DATA_DIR, "jukebox-suggestions.json");
 const LISTENERS_PATH = path.join(DATA_DIR, "live-listeners.json");
 const OWNER_QUEUE_PATH = path.join(DATA_DIR, "owner-queue.json");
+const ACTIVITY_LOG_PATH = path.join(DATA_DIR, "activity-log.json");
+
+export type ActivityLogEntry = {
+  id: string;
+  type:
+    | "join"
+    | "presence"
+    | "jukebox"
+    | "like"
+    | "request"
+    | "desk_save"
+    | "desk_queue"
+    | "listen_mode";
+  listenerId?: string;
+  instagram?: string;
+  summary: string;
+  details?: Record<string, string | number | boolean | null>;
+  createdAt: string;
+};
 
 export const JUKEBOX_AUTO_INTERVAL_MS = 15 * 60 * 1000;
 export const LISTENER_TTL_MS = 2 * 60 * 1000;
@@ -490,6 +509,34 @@ export async function acknowledgePlayerInject(inject: PlayerInject) {
   await saveFmDeskSettings({
     runtime: { lastAutoJukeboxAt: new Date().toISOString() }
   });
+}
+
+export async function appendActivityLog(input: {
+  type: ActivityLogEntry["type"];
+  listenerId?: string;
+  instagram?: string;
+  summary: string;
+  details?: Record<string, string | number | boolean | null>;
+}) {
+  const entries = await readJsonFile<ActivityLogEntry[]>(ACTIVITY_LOG_PATH, []);
+  const entry: ActivityLogEntry = {
+    id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: input.type,
+    listenerId: input.listenerId,
+    instagram: input.instagram,
+    summary: input.summary,
+    details: input.details,
+    createdAt: new Date().toISOString()
+  };
+
+  entries.unshift(entry);
+  await writeJsonFile(ACTIVITY_LOG_PATH, entries.slice(0, 2000));
+  return entry;
+}
+
+export async function getActivityLog(limit = 100): Promise<ActivityLogEntry[]> {
+  const entries = await readJsonFile<ActivityLogEntry[]>(ACTIVITY_LOG_PATH, []);
+  return entries.slice(0, limit);
 }
 
 export function verifyFmDeskAccess(request: Request) {

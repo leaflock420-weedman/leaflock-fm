@@ -8,6 +8,7 @@ import {
   type FmPlaylistKey
 } from "@/lib/fm-playlists";
 import type {
+  ActivityLogEntry,
   FmDeskSettings,
   JukeboxSuggestion,
   LiveListener,
@@ -29,6 +30,7 @@ type DeskPayload = {
   listeners: LiveListener[];
   requests: TrackRequest[];
   ownerQueue: OwnerQueueItem[];
+  activityLog: ActivityLogEntry[];
 };
 
 const STORAGE_KEY = "leaflock-fm-desk-key";
@@ -457,6 +459,34 @@ export default function FmDeskPanel() {
                   <p className="text-zinc-400">{request.message}</p>
                 </li>
               ))
+            )}
+          </ul>
+        </section>
+
+        <section className="mt-6 border-t border-zinc-800 pt-5">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-zinc-400">
+            Activity records
+          </h3>
+          <p className="mt-1 text-xs text-zinc-500">
+            Backup log — listeners, requests, loves, jukebox, playlist saves.
+          </p>
+          <ul className="mt-3 max-h-48 space-y-2 overflow-y-auto text-xs">
+            {data.activityLog?.length ? (
+              data.activityLog.slice(0, 30).map((entry) => (
+                <li key={entry.id} className="border-b border-zinc-900 pb-2 text-zinc-400">
+                  <span className="text-zinc-600">
+                    {new Date(entry.createdAt).toLocaleString("en-AU", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      day: "numeric",
+                      month: "short"
+                    })}
+                  </span>
+                  <span className="ml-2 text-zinc-300">{entry.summary}</span>
+                </li>
+              ))
+            ) : (
+              <li className="text-zinc-500">No activity logged yet.</li>
             )}
           </ul>
         </section>

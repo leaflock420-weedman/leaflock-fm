@@ -1,5 +1,5 @@
 import { emailTrackLove } from "@/lib/fm-email";
-import { getTopLikes, recordTrackLike } from "@/lib/fm-store";
+import { appendActivityLog, getTopLikes, recordTrackLike } from "@/lib/fm-store";
 
 export async function GET(request: Request) {
   const limit = Number(new URL(request.url).searchParams.get("limit") ?? "10");
@@ -18,6 +18,15 @@ export async function POST(request: Request) {
   if (!body.trackId?.trim() || !body.title?.trim()) {
     return Response.json({ error: "trackId and title are required" }, { status: 400 });
   }
+
+  void appendActivityLog({
+    type: "like",
+    summary: `Loved: ${body.title?.trim()}`,
+    details: {
+      trackId: body.trackId?.trim() ?? null,
+      artist: body.artist?.trim() ?? null
+    }
+  });
 
   const like = await recordTrackLike({
     trackId: body.trackId.trim(),
