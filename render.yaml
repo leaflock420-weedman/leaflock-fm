@@ -35,3 +35,7 @@ services:
         sync: false
       - key: FM_EMAIL_ON_LIKE
         value: "true"
+      - key: WEBSITE_URL
+        value: https://www.leaflock.com.au
+      - key: MOBILE_GAME_URL
+        value: https://wegrow.leaflock.com.au

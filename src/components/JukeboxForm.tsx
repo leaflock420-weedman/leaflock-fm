@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Music2, Send } from "lucide-react";
 
 const LISTENER_ID_KEY = "leaflock-listener-id";
+const INSTAGRAM_KEY = "leaflock-instagram";
 
 function getListenerId() {
   if (typeof window === "undefined") return "";
@@ -14,15 +15,31 @@ function getListenerId() {
   return created;
 }
 
+function normalizeInstagramHandle(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
+}
+
 type JukeboxFormProps = {
   sharedRoom?: boolean;
 };
 
 export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
   const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [instagram, setInstagram] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(INSTAGRAM_KEY);
+      if (stored) setInstagram(stored);
+    } catch {
+      // Ignore storage errors.
+    }
+  }, []);
 
   useEffect(() => {
     if (!sharedRoom) return;
@@ -34,7 +51,10 @@ export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
         await fetch("/api/fm/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ listenerId })
+          body: JSON.stringify({
+            listenerId,
+            instagram: instagram.trim() ? normalizeInstagramHandle(instagram) : undefined
+          })
         });
       } catch {
         // Ignore heartbeat errors.
@@ -47,7 +67,7 @@ export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
     }, 30_000);
 
     return () => window.clearInterval(intervalId);
-  }, [sharedRoom]);
+  }, [instagram, sharedRoom]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -55,16 +75,26 @@ export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
     setStatus(null);
     setError(null);
 
+    const normalizedInstagram = normalizeInstagramHandle(instagram);
+
     try {
       const response = await fetch("/api/fm/jukebox", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ youtubeUrl })
+        body: JSON.stringify({
+          youtubeUrl,
+          instagram: normalizedInstagram || undefined,
+          suggestedBy: getListenerId()
+        })
       });
 
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) {
         throw new Error(payload.error || "Could not add jukebox suggestion");
+      }
+
+      if (normalizedInstagram) {
+        window.localStorage.setItem(INSTAGRAM_KEY, normalizedInstagram);
       }
 
       setYoutubeUrl("");
@@ -99,6 +129,13 @@ export default function JukeboxForm({ sharedRoom = false }: JukeboxFormProps) {
           required
           className="w-full rounded-xl border border-zinc-700 bg-black px-4 py-3 text-sm text-white"
         />
+        <input
+          value={instagram}
+          onChange={(event) => setInstagram(event.target.value)}
+          placeholder="@yourhandle"
+          className="w-full rounded-xl border border-zinc-700 bg-black px-4 py-3 text-sm text-white"
+        />
+        <p className="text-xs text-zinc-500">Instagram handle is optional but helps us credit your request.</p>
         {status ? <p className="text-sm text-emerald-400">{status}</p> : null}
         {error ? <p className="text-sm text-amber-400">{error}</p> : null}
         <button

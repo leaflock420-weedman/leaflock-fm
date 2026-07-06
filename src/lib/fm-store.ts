@@ -191,6 +191,30 @@ export async function getFmDeskSettings(): Promise<FmDeskSettings> {
   }
 }
 
+export function resolvePublicLinks() {
+  const websiteUrl =
+    process.env.WEBSITE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_WEBSITE_URL?.trim() ||
+    "https://www.leaflock.com.au";
+  const mobileGameUrl =
+    process.env.MOBILE_GAME_URL?.trim() ||
+    process.env.NEXT_PUBLIC_MOBILE_GAME_URL?.trim() ||
+    "https://wegrow.leaflock.com.au";
+  const officialYoutubeUrl =
+    process.env.OFFICIAL_YOUTUBE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_OFFICIAL_YOUTUBE_URL?.trim() ||
+    "";
+  const instagramUrl =
+    process.env.INSTAGRAM_URL?.trim() || process.env.NEXT_PUBLIC_INSTAGRAM_URL?.trim() || "";
+
+  return {
+    websiteUrl,
+    mobileGameUrl,
+    officialYoutubeUrl,
+    instagramUrl
+  };
+}
+
 /** Listener-safe active rotation */
 export async function getFmPublicConfig() {
   const settings = await getFmDeskSettings();
@@ -210,6 +234,7 @@ export async function getFmPublicConfig() {
     updatedAt: settings.updatedAt,
     youtubeLiveVideoId: settings.youtubeLiveVideoId,
     youtubeChannelId: settings.youtubeChannelId,
+    links: resolvePublicLinks(),
     schedule: settings.schedule.map((item) => ({
       id: item.id,
       title: item.title,

@@ -230,6 +230,11 @@ type PublicStationPayload = {
   upNext: string | null;
   requestCredit: string | null;
   listenerCount?: number;
+  nextVideoId?: string | null;
+  nextTitle?: string | null;
+  trackStartedAt?: string;
+  serverTime?: string;
+  durationSec?: number;
 };
 
 export default function LeafLockPlayer({
@@ -304,6 +309,7 @@ export default function LeafLockPlayer({
   const stationEndedAtRef = useRef(0);
   const listenModeRef = useRef(listenMode);
   const userPlaybackIntentRef = useRef<"playing" | "paused" | "stopped">("stopped");
+  const liveStationJoinedRef = useRef(false);
 
   const syncPreviousState = useCallback(() => {
     setCanGoPrevious(sessionIndexRef.current > 0);
@@ -889,8 +895,12 @@ export default function LeafLockPlayer({
   const syncPlaybackProgressRef = useRef(syncPlaybackProgress);
   const prefetchOnInactiveDeckRef = useRef(prefetchOnInactiveDeck);
   const peekNextScheduledTrackRef = useRef(peekNextScheduledTrack);
-  const applyLiveStationTrackRef =
-    useRef<(station: PublicStationPayload, options?: { forceReload?: boolean }) => void>(() => {});
+  const applyLiveStationTrackRef = useRef<
+    (
+      station: PublicStationPayload,
+      options?: { forceReload?: boolean; resumePlayback?: boolean; initialCue?: boolean }
+    ) => void
+  >(() => {});
   const startTimePollingRef = useRef(startTimePolling);
   const stopTimePollingRef = useRef(stopTimePolling);
 
@@ -921,8 +931,10 @@ export default function LeafLockPlayer({
     if (listenMode === "live") {
       setLiveRoomLabel("Live room — synced with everyone");
       stationRevisionRef.current = -1;
+      liveStationJoinedRef.current = false;
     } else {
       setLiveRoomLabel(null);
+      liveStationJoinedRef.current = false;
     }
   }, [listenMode]);
 
@@ -973,7 +985,10 @@ export default function LeafLockPlayer({
   }, [showVideo, resizePlayerHosts]);
 
   const applyLiveStationTrack = useCallback(
-    (station: PublicStationPayload, options?: { forceReload?: boolean }) => {
+    (
+      station: PublicStationPayload,
+      options?: { forceReload?: boolean; resumePlayback?: boolean; initialCue?: boolean }
+    ) => {
       const player = getActivePlayer();
       if (!player || !playersReadyRef.current[activeDeckRef.current]) return;
 
@@ -982,28 +997,31 @@ export default function LeafLockPlayer({
       const videoChanged = currentVideoIdRef.current !== track.videoId;
       const revisionChanged = station.revision !== stationRevisionRef.current;
       const shouldReload =
-        Boolean(options?.forceReload && videoChanged) || (revisionChanged && videoChanged);
+        Boolean(options?.forceReload && videoChanged) ||
+        (revisionChanged && videoChanged) ||
+        deckVideoIdRef.current[deck] !== track.videoId;
 
       setRequestCredit(station.requestCredit);
-      setUpNext(station.upNext);
+      setUpNext(station.upNext ?? station.nextTitle ?? null);
       setLiveRoomLabel(
         station.listenerCount && station.listenerCount > 0
           ? `Live room — ${station.listenerCount} listening`
           : "Live room — synced with everyone"
       );
 
-      if (!revisionChanged && !videoChanged) {
+      if (!revisionChanged && !videoChanged && !options?.resumePlayback && !options?.initialCue) {
         return;
       }
 
       stationRevisionRef.current = station.revision;
       outsidePlaylistAllowedRef.current = track.videoId;
+      liveStationJoinedRef.current = true;
 
       const video: PlaylistVideo = {
         id: track.videoId,
         title: track.title,
         channelTitle: track.artist,
-        durationSec: track.durationSec
+        durationSec: track.durationSec ?? station.durationSec
       };
 
       setTrackUi(video, track.artist ?? "LeafLock FM");
@@ -1014,7 +1032,7 @@ export default function LeafLockPlayer({
           if (resumeAt > 0.5) {
             player.seekTo(resumeAt, true);
           }
-          if (userPlaybackIntentRef.current !== "playing") {
+          if (options?.initialCue || userPlaybackIntentRef.current !== "playing") {
             isPlayingRef.current = false;
             setIsPlaying(false);
             setIsConnected(true);
@@ -1035,17 +1053,31 @@ export default function LeafLockPlayer({
         }
       };
 
-      if (shouldReload || deckVideoIdRef.current[deck] !== track.videoId) {
-        player.loadVideoById(track.videoId);
-        deckVideoIdRef.current[deck] = track.videoId;
-        window.setTimeout(startPlayback, 500);
+      if (station.nextVideoId) {
+        prefetchOnInactiveDeck({
+          id: station.nextVideoId,
+          title: station.nextTitle ?? "Up next",
+          channelTitle: "LeafLock FM"
+        });
+      }
+
+      if (shouldReload) {
+        if (options?.initialCue) {
+          player.cueVideoById(track.videoId);
+          deckVideoIdRef.current[deck] = track.videoId;
+          window.setTimeout(startPlayback, 120);
+        } else {
+          player.loadVideoById(track.videoId);
+          deckVideoIdRef.current[deck] = track.videoId;
+          window.setTimeout(startPlayback, 500);
+        }
       } else {
         startPlayback();
       }
 
       window.setTimeout(() => resizePlayerHosts(), 50);
     },
-    [applyDeckVolume, getActivePlayer, resizePlayerHosts, setTrackUi]
+    [applyDeckVolume, getActivePlayer, prefetchOnInactiveDeck, resizePlayerHosts, setTrackUi]
   );
 
   useEffect(() => {
@@ -1103,7 +1135,7 @@ export default function LeafLockPlayer({
 
     const syncStation = async () => {
       try {
-        const response = await fetch("/api/fm/station", { cache: "no-store" });
+        const response = await fetch("/api/fm/now-playing", { cache: "no-store" });
         const station = (await response.json()) as PublicStationPayload;
         if (!station.current?.videoId) return;
 
@@ -1114,7 +1146,10 @@ export default function LeafLockPlayer({
         const revisionChanged = station.revision !== stationRevisionRef.current;
 
         if (revisionChanged || videoChanged) {
-          applyLiveStationTrack(station, { forceReload: videoChanged });
+          applyLiveStationTrack(station, {
+            forceReload: videoChanged,
+            resumePlayback: userPlaybackIntentRef.current === "playing"
+          });
           return;
         }
 
@@ -1157,6 +1192,21 @@ export default function LeafLockPlayer({
   }, [applyLiveStationTrack, getActivePlayer, listenMode, playlistReady, playersReady]);
 
   useEffect(() => {
+    if (listenMode !== "live" || !playlistReady || !playersReady || liveStationJoinedRef.current) {
+      return;
+    }
+
+    void fetch("/api/fm/now-playing", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((station: PublicStationPayload) => {
+        applyLiveStationTrackRef.current(station, { initialCue: true });
+      })
+      .catch(() => {
+        // Station poll will recover.
+      });
+  }, [listenMode, playlistReady, playersReady]);
+
+  useEffect(() => {
     if (listenMode !== "solo" || !playlistReady) return;
 
     const pollInject = async () => {
@@ -1179,6 +1229,21 @@ export default function LeafLockPlayer({
   }, [listenMode, playlistReady, refreshUpNextLabel]);
 
   useEffect(() => {
+    if (listenMode !== "live" || !playlistReady || !playersReady || liveStationJoinedRef.current) {
+      return;
+    }
+
+    void fetch("/api/fm/now-playing", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((station: PublicStationPayload) => {
+        applyLiveStationTrackRef.current(station, { initialCue: true });
+      })
+      .catch(() => {
+        // Station poll will recover.
+      });
+  }, [listenMode, playlistReady, playersReady]);
+
+  useEffect(() => {
     const mobile =
       /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ||
       window.matchMedia("(pointer: coarse)").matches;
@@ -1190,6 +1255,18 @@ export default function LeafLockPlayer({
 
     async function bootstrap() {
       try {
+        if (listenModeRef.current === "live") {
+          const nowPlayingResponse = await fetch("/api/fm/now-playing", { cache: "no-store" });
+          const nowPlaying = (await nowPlayingResponse.json()) as PublicStationPayload;
+          if (!cancelled && nowPlaying.current?.videoId) {
+            setNowPlaying({
+              title: nowPlaying.current.title,
+              artist: nowPlaying.current.artist ?? "LeafLock FM — Live"
+            });
+            setUpNext(nowPlaying.upNext ?? nowPlaying.nextTitle ?? null);
+          }
+        }
+
         const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
         const config = (await configResponse.json()) as {
           playlistId?: string;
@@ -1235,10 +1312,12 @@ export default function LeafLockPlayer({
         prefetchedNextRef.current = null;
         setPlaylistCount(payload.count ?? payload.videos.length);
         setPlaylistReady(true);
-        setNowPlaying({
-          title: "Ready to shuffle",
-          artist: `${payload.videos.length} tracks in rotation`
-        });
+        if (listenModeRef.current !== "live") {
+          setNowPlaying({
+            title: "Ready to shuffle",
+            artist: `${payload.videos.length} tracks in rotation`
+          });
+        }
       } catch (error) {
         if (!cancelled) {
           setPlaybackError(
@@ -1273,7 +1352,9 @@ export default function LeafLockPlayer({
         const player = new YT.Player(host, {
           height: "2",
           width: "2",
-          playerVars: createPlayerVars(playlistIdRef.current),
+          playerVars: createPlayerVars(
+            listenModeRef.current === "live" ? null : playlistIdRef.current
+          ),
           events: {
             onReady: (event) => {
               playersReadyRef.current[deck] = true;
@@ -1299,6 +1380,18 @@ export default function LeafLockPlayer({
                     playlistSetRef.current.has(playingId);
 
                   if (playingId && deck === activeDeckRef.current && !allowed) {
+                    if (listenModeRef.current === "live") {
+                      void fetch("/api/fm/now-playing", { cache: "no-store" })
+                        .then((response) => response.json())
+                        .then((station: PublicStationPayload) => {
+                          applyLiveStationTrackRef.current(station, {
+                            forceReload: true,
+                            resumePlayback: userPlaybackIntentRef.current === "playing"
+                          });
+                        })
+                        .catch(() => undefined);
+                      return;
+                    }
                     const current = sessionQueueRef.current[sessionIndexRef.current];
                     if (current) {
                       event.target.loadVideoById(current.id);
@@ -1359,12 +1452,13 @@ export default function LeafLockPlayer({
                     }
                     stationEndedAtRef.current = now;
 
-                    void fetch("/api/fm/station", { cache: "no-store" })
+                    void fetch("/api/fm/now-playing", { cache: "no-store" })
                       .then((response) => response.json())
                       .then((station: PublicStationPayload) => {
-                        if (station.current?.videoId !== currentVideoIdRef.current) {
-                          applyLiveStationTrackRef.current(station, { forceReload: true });
-                        }
+                        applyLiveStationTrackRef.current(station, {
+                          forceReload: true,
+                          resumePlayback: userPlaybackIntentRef.current === "playing"
+                        });
                       })
                       .catch(() => {
                         // Station poll will recover on next interval.
@@ -1380,6 +1474,19 @@ export default function LeafLockPlayer({
               setIsBuffering(false);
               setIsPlaying(false);
               setIsConnected(false);
+              if (listenModeRef.current === "live") {
+                setPlaybackError("This track could not be played. Re-syncing live room...");
+                void fetch("/api/fm/now-playing", { cache: "no-store" })
+                  .then((response) => response.json())
+                  .then((station: PublicStationPayload) => {
+                    applyLiveStationTrackRef.current(station, {
+                      forceReload: true,
+                      resumePlayback: userPlaybackIntentRef.current === "playing"
+                    });
+                  })
+                  .catch(() => undefined);
+                return;
+              }
               setPlaybackError("This track could not be played. Skipping to another.");
               playNextTrackAutoRef.current();
             }
@@ -1502,10 +1609,10 @@ export default function LeafLockPlayer({
     bindMediaSession();
 
     if (listenModeRef.current === "live") {
-      void fetch("/api/fm/station", { cache: "no-store" })
+      void fetch("/api/fm/now-playing", { cache: "no-store" })
         .then((response) => response.json())
         .then((station: PublicStationPayload) => {
-          applyLiveStationTrackRef.current(station, { forceReload: true });
+          applyLiveStationTrackRef.current(station, { resumePlayback: true });
         })
         .catch(() => {
           setPlaybackError("Could not join the live room. Try again.");
@@ -2027,57 +2134,23 @@ export default function LeafLockPlayer({
           ) : isBlending ? (
             "Smooth DJ mix — 5 second crossfade in progress"
           ) : isConnected && isPlaying ? (
-            djBlendEnabled
-              ? "DJ blend — starts in the last 15 seconds with a 5 second crossfade"
-              : "Shuffling your playlist — no repeat within 60 minutes"
+            listenMode === "live"
+              ? "Live room — locked to the station timeline"
+              : djBlendEnabled
+                ? "DJ blend — starts in the last 15 seconds with a 5 second crossfade"
+                : "Shuffling your playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
             "Loading YouTube playlist..."
+          ) : listenMode === "live" ? (
+            "Tap play to join the live room"
           ) : (
             "Tap play to start shuffled playlist"
           )}
           {isMobile ? (
             <span className="mt-2 block text-xs text-zinc-500">
-              Phone tip: use the bottom bar or lock-screen controls for skip forward/back while you
-              browse.
+              Background listening: use the bottom bar or lock-screen play/pause while you browse.
             </span>
           ) : null}
-          <span className="mt-1 block text-xs text-zinc-600">
-            {playlistCount > 0 && playlistId ? (
-              <>
-                <span className="sm:hidden">{playlistCount} tracks loaded</span>
-                <span className="hidden truncate sm:block">
-                  {playlistCount} tracks • https://www.youtube.com/playlist?list={playlistId}
-                </span>
-              </>
-            ) : (
-              "Loading playlist..."
-            )}
-          </span>
-        </div>
-
-        <div className="flex flex-wrap gap-x-4 gap-y-2 text-emerald-400">
-          <a href="/fm" className="hover:underline">
-            Live FM
-          </a>
-          <span className="text-zinc-700">•</span>
-          {playlistId ? (
-            <a
-              href={`https://www.youtube.com/playlist?list=${playlistId}`}
-              target="_blank"
-              rel="noreferrer"
-              className="hover:underline"
-            >
-              YouTube
-            </a>
-          ) : null}
-          <span className="text-zinc-700">•</span>
-          <a href="https://youtube.com/@leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
-            YouTube
-          </a>
-          <span className="text-zinc-700">•</span>
-          <a href="https://instagram.com/leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
-            Instagram
-          </a>
         </div>
       </div>
 

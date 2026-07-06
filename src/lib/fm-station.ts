@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
-import { getStationControl } from "@/lib/fm-admin-data";
+import { getStationControl, type StationMode } from "@/lib/fm-admin-data";
 import {
   acknowledgePlayerInject,
   getFmPublicConfig,
@@ -50,6 +50,15 @@ export type PublicStation = {
   isPlaying: boolean;
   listenerCount: number;
   listeners: Awaited<ReturnType<typeof getLiveListeners>>;
+};
+
+export type NowPlayingPayload = PublicStation & {
+  serverTime: string;
+  trackStartedAt: string;
+  durationSec: number;
+  nextVideoId: string | null;
+  nextTitle: string | null;
+  mode: StationMode;
 };
 
 const DEFAULT_TRACK_SECONDS = 240;
@@ -163,6 +172,39 @@ function peekNextInRotation(state: StationState): PlaylistVideo | null {
 }
 
 const PLAYLIST_TRACKS_BEFORE_REQUEST = 3;
+
+/** Preview the next track without advancing station or acknowledging jukebox injects. */
+async function peekUpcomingTrack(state: StationState): Promise<StationTrack | null> {
+  const control = await getStationControl();
+  const requestDue =
+    control.allowRequests && state.playlistTracksSinceRequest >= PLAYLIST_TRACKS_BEFORE_REQUEST;
+
+  const inject = requestDue ? await peekPlayerInject() : null;
+  if (inject) {
+    return toStationTrack(
+      {
+        id: inject.videoId,
+        title: inject.title,
+        channelTitle: inject.source === "jukebox" ? "Jukebox" : "DJ queue"
+      },
+      inject.source === "jukebox" ? "jukebox" : "owner",
+      formatInjectCredit(inject)
+    );
+  }
+
+  if (state.requestFlow?.vibeRemaining) {
+    const anchor =
+      state.rotation.find((video) => video.id === state.requestFlow?.anchorVideoId) ??
+      ({ id: state.requestFlow.anchorVideoId, title: "Requested track" } as PlaylistVideo);
+    const vibe = pickVibeMatchFromPlaylist(state.rotation, anchor);
+    if (vibe) {
+      return toStationTrack(vibe, "vibe");
+    }
+  }
+
+  const next = peekNextInRotation(state);
+  return next ? toStationTrack(next) : null;
+}
 
 async function resolveNextStationTrack(state: StationState): Promise<{
   track: StationTrack;
@@ -326,4 +368,21 @@ export async function resetLiveStation(): Promise<PublicStation> {
   const state = await bootstrapStation();
   await saveStationState(state);
   return getPublicStation();
+}
+
+/** Server-authoritative now playing — permanent station host timeline for all listeners. */
+export async function getNowPlaying(): Promise<NowPlayingPayload> {
+  const [station, control] = await Promise.all([getPublicStation(), getStationControl()]);
+  const state = await loadStationState();
+  const upcoming = state ? await peekUpcomingTrack(state) : null;
+
+  return {
+    ...station,
+    serverTime: new Date().toISOString(),
+    trackStartedAt: state?.trackStartedAt ?? new Date().toISOString(),
+    durationSec: trackDurationSec(station.current),
+    nextVideoId: upcoming?.videoId ?? null,
+    nextTitle: upcoming?.title ?? station.upNext,
+    mode: control.mode
+  };
 }
