@@ -11,6 +11,13 @@ import {
   type PlaylistCategory,
   type StationMode
 } from "@/lib/fm-admin-data";
+import {
+  forceDj420NextTrack,
+  getDj420AdminSnapshot,
+  restartDj420Host,
+  runDj420Warmup
+} from "@/lib/dj420-host";
+import { ensurePlaylistCache, refreshPlaylistCache } from "@/lib/playlist-cache";
 import { resetLiveStation } from "@/lib/fm-station";
 import { verifyFmDeskAccess } from "@/lib/fm-store";
 
@@ -19,14 +26,15 @@ export async function GET(request: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const [control, playlists, requests, shows] = await Promise.all([
+  const [control, playlists, requests, shows, dj420] = await Promise.all([
     getStationControl(),
     getPlaylistRegistry(),
     getRequestQueue(),
-    getScheduledShows()
+    getScheduledShows(),
+    getDj420AdminSnapshot()
   ]);
 
-  return Response.json({ control, playlists, requests, shows });
+  return Response.json({ control, playlists, requests, shows, dj420 });
 }
 
 export async function PUT(request: Request) {
@@ -68,12 +76,28 @@ export async function PUT(request: Request) {
     requestStatus?: "approved" | "rejected" | "skipped" | "pinned" | "banned" | "played";
   };
 
+  if (body.action === "restart-dj420") {
+    const dj420 = await restartDj420Host();
+    return Response.json({ dj420 });
+  }
+
+  if (body.action === "force-next") {
+    const dj420 = await forceDj420NextTrack();
+    return Response.json({ dj420 });
+  }
+
+  if (body.action === "run-warmup") {
+    const warmup = await runDj420Warmup();
+    return Response.json({ warmup });
+  }
+
   if (body.action === "return-default") {
     const control = await getStationControl();
     const next = await saveStationControl({
       mode: "auto_radio",
       activePlaylistId: control.defaultPlaylistId
     });
+    await ensurePlaylistCache(control.defaultPlaylistId);
     await resetLiveStation();
     return Response.json({ control: next });
   }
@@ -111,6 +135,7 @@ export async function PUT(request: Request) {
       mode: "auto_radio",
       activePlaylistId: body.activePlaylistId
     });
+    await refreshPlaylistCache(body.activePlaylistId);
     await resetLiveStation();
     return Response.json({ control: next });
   }
@@ -130,6 +155,7 @@ export async function PUT(request: Request) {
       isDefault: body.playlist.isDefault ?? false,
       archived: body.playlist.archived ?? false
     });
+    await refreshPlaylistCache(playlistId);
     if (entry.isDefault) {
       await saveStationControl({
         defaultPlaylistId: entry.youtubePlaylistId,

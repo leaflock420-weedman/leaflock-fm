@@ -17,6 +17,7 @@ export default function FmListenMode() {
   const [mode, setMode] = useState<ListenMode>("live");
   const [listenerCount, setListenerCount] = useState(0);
   const [listeners, setListeners] = useState<LiveListener[]>([]);
+  const [hostStatus, setHostStatus] = useState<"online" | "offline">("online");
 
   useEffect(() => {
     try {
@@ -38,9 +39,12 @@ export default function FmListenMode() {
         const payload = (await response.json()) as {
           listenerCount?: number;
           listeners?: LiveListener[];
+          hostName?: string;
+          hostStatus?: "online" | "offline";
         };
         setListenerCount(payload.listenerCount ?? 0);
         setListeners(payload.listeners ?? []);
+        setHostStatus(payload.hostStatus === "offline" ? "offline" : "online");
       } catch {
         // Ignore polling errors.
       }
@@ -111,9 +115,12 @@ export default function FmListenMode() {
         {mode === "live" ? (
           <div className="mt-4 rounded-xl border border-zinc-800 bg-black/40 px-4 py-3 text-sm">
             <p className="font-medium text-white">
+              {hostStatus === "online" ? "DJ420 is hosting" : "Station host reconnecting"}
+            </p>
+            <p className="mt-1 text-xs text-zinc-400">
               {listenerCount > 0
-                ? `${listenerCount} listening live right now`
-                : "You are tuning into the main live broadcast"}
+                ? `${listenerCount} listener${listenerCount === 1 ? "" : "s"} tuned in`
+                : "You are the first listener — joining the live broadcast in progress"}
             </p>
             {listeners.length > 0 ? (
               <p className="mt-1 text-xs text-zinc-500">

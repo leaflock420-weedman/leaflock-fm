@@ -6,7 +6,7 @@ services:
     plan: starter
     buildCommand: npm install && npm run build
     startCommand: npm start
-    healthCheckPath: /fm
+    healthCheckPath: /health
     numInstances: 1
     domains:
       - fm.leaflock.com.au
@@ -39,3 +39,10 @@ services:
         value: https://www.leaflock.com.au
       - key: MOBILE_GAME_URL
         value: https://wegrow.leaflock.com.au
+
+  - type: cron
+    name: dj420-warmup
+    schedule: "*/5 * * * *"
+    runtime: node
+    buildCommand: "true"
+    startCommand: curl -fsS "https://fm.leaflock.com.au/api/fm/warmup" || exit 1

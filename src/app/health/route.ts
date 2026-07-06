@@ -1,0 +1,62 @@
+import { getDj420State, resolveDj420Status } from "@/lib/dj420-state";
+import { getNowPlaying } from "@/lib/fm-station";
+import { prisma } from "@/lib/prisma";
+import fs from "fs/promises";
+import path from "path";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+const STATION_PATH = path.join(process.cwd(), "data", "station-state.json");
+
+export async function GET() {
+  const checks: Record<string, boolean> = {
+    server: true,
+    database: false,
+    stationState: false,
+    dj420Heartbeat: false,
+    currentTrack: false
+  };
+
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    checks.database = true;
+  } catch {
+    checks.database = false;
+  }
+
+  try {
+    await fs.access(STATION_PATH);
+    checks.stationState = true;
+  } catch {
+    checks.stationState = false;
+  }
+
+  const dj420 = await getDj420State();
+  checks.dj420Heartbeat = resolveDj420Status(dj420) === "online";
+
+  try {
+    const nowPlaying = await getNowPlaying();
+    checks.currentTrack = Boolean(nowPlaying.current?.videoId);
+  } catch {
+    checks.currentTrack = false;
+  }
+
+  const ready =
+    checks.server &&
+    checks.database &&
+    checks.stationState &&
+    checks.dj420Heartbeat &&
+    checks.currentTrack;
+
+  return Response.json(
+    {
+      ok: ready,
+      checks,
+      hostName: "DJ420",
+      hostStatus: resolveDj420Status(dj420),
+      serverTime: new Date().toISOString()
+    },
+    { status: ready ? 200 : 503 }
+  );
+}

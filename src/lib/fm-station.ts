@@ -4,11 +4,12 @@ import { getStationControl, type StationMode } from "@/lib/fm-admin-data";
 import {
   acknowledgePlayerInject,
   getFmPublicConfig,
-  getLiveListeners,
+  getPublicLiveListeners,
   peekPlayerInject,
   type PlayerInject
 } from "@/lib/fm-store";
-import { fetchPlaylistVideosFromYouTubeApi } from "@/lib/youtube-api";
+import { getDj420State, resolveDj420Status } from "@/lib/dj420-state";
+import { ensurePlaylistCache, playlistThumbnail } from "@/lib/playlist-cache";
 import {
   createShuffledRotation,
   pickVibeMatchFromPlaylist,
@@ -49,16 +50,23 @@ export type PublicStation = {
   requestCredit: string | null;
   isPlaying: boolean;
   listenerCount: number;
-  listeners: Awaited<ReturnType<typeof getLiveListeners>>;
+  listeners: Awaited<ReturnType<typeof getPublicLiveListeners>>;
+  hostName?: "DJ420";
+  hostStatus?: "online" | "offline";
 };
 
 export type NowPlayingPayload = PublicStation & {
   serverTime: string;
   trackStartedAt: string;
   durationSec: number;
+  currentOffsetSeconds: number;
   nextVideoId: string | null;
   nextTitle: string | null;
   mode: StationMode;
+  hostName: "DJ420";
+  hostStatus: "online" | "offline";
+  thumbnail: string | null;
+  activePlaylist: string;
 };
 
 const DEFAULT_TRACK_SECONDS = 240;
@@ -142,7 +150,8 @@ async function resolveActivePlaylistId(): Promise<string> {
 
 async function bootstrapStation(): Promise<StationState> {
   const playlistId = await resolveActivePlaylistId();
-  const videos = await fetchPlaylistVideosFromYouTubeApi(playlistId);
+  const cache = await ensurePlaylistCache(playlistId);
+  const videos = cache.videos;
   const rotation = createShuffledRotation(videos);
   const first = rotation[0] ?? videos[0];
 
@@ -316,7 +325,8 @@ export async function getPublicStation(): Promise<PublicStation> {
 
     const control = await getStationControl();
     if (control.mode === "maintenance") {
-      const listeners = await getLiveListeners();
+      const listeners = await getPublicLiveListeners();
+      const dj420 = await getDj420State();
       return {
         revision: state.revision,
         playlistId: state.playlistId,
@@ -326,7 +336,9 @@ export async function getPublicStation(): Promise<PublicStation> {
         requestCredit: null,
         isPlaying: false,
         listenerCount: listeners.length,
-        listeners
+        listeners,
+        hostName: "DJ420",
+        hostStatus: resolveDj420Status(dj420)
       };
     }
 
@@ -348,7 +360,8 @@ export async function getPublicStation(): Promise<PublicStation> {
     const peekState = { ...state };
     const upcoming = peekNextInRotation(peekState);
 
-    const listeners = await getLiveListeners();
+    const listeners = await getPublicLiveListeners();
+    const dj420 = await getDj420State();
 
     return {
       revision: state.revision,
@@ -359,7 +372,42 @@ export async function getPublicStation(): Promise<PublicStation> {
       requestCredit: state.current.requestCredit ?? null,
       isPlaying: state.isPlaying,
       listenerCount: listeners.length,
-      listeners
+      listeners,
+      hostName: "DJ420",
+      hostStatus: resolveDj420Status(dj420)
+    };
+  });
+}
+
+export async function forceAdvanceStation(): Promise<PublicStation> {
+  return withStationMutex(async () => {
+    let state = await loadStationState();
+    if (!state) {
+      state = await bootstrapStation();
+    }
+
+    state = await advanceStation(state);
+    await saveStationState(state);
+
+    const elapsed = (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
+    const duration = trackDurationSec(state.current);
+    const peekState = { ...state };
+    const upcoming = peekNextInRotation(peekState);
+    const listeners = await getPublicLiveListeners();
+    const dj420 = await getDj420State();
+
+    return {
+      revision: state.revision,
+      playlistId: state.playlistId,
+      current: state.current,
+      offsetSeconds: Math.max(0, Math.min(elapsed, duration)),
+      upNext: upcoming?.title ?? null,
+      requestCredit: state.current.requestCredit ?? null,
+      isPlaying: state.isPlaying,
+      listenerCount: listeners.length,
+      listeners,
+      hostName: "DJ420",
+      hostStatus: resolveDj420Status(dj420)
     };
   });
 }
@@ -372,17 +420,27 @@ export async function resetLiveStation(): Promise<PublicStation> {
 
 /** Server-authoritative now playing — permanent station host timeline for all listeners. */
 export async function getNowPlaying(): Promise<NowPlayingPayload> {
-  const [station, control] = await Promise.all([getPublicStation(), getStationControl()]);
+  const [station, control, dj420] = await Promise.all([
+    getPublicStation(),
+    getStationControl(),
+    getDj420State()
+  ]);
   const state = await loadStationState();
   const upcoming = state ? await peekUpcomingTrack(state) : null;
+  const offsetSeconds = station.offsetSeconds;
 
   return {
     ...station,
     serverTime: new Date().toISOString(),
     trackStartedAt: state?.trackStartedAt ?? new Date().toISOString(),
     durationSec: trackDurationSec(station.current),
+    currentOffsetSeconds: offsetSeconds,
     nextVideoId: upcoming?.videoId ?? null,
     nextTitle: upcoming?.title ?? station.upNext,
-    mode: control.mode
+    mode: control.mode,
+    hostName: "DJ420",
+    hostStatus: resolveDj420Status(dj420),
+    thumbnail: station.current.videoId ? playlistThumbnail(station.current.videoId) : null,
+    activePlaylist: station.playlistId
   };
 }

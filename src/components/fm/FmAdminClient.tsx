@@ -30,6 +30,31 @@ type AdminPayload = {
     boosts: number;
   }>;
   shows: Array<{ id: string; name: string; startTime: string; endTime: string }>;
+  dj420?: {
+    dj420: {
+      status: string;
+      lastHeartbeat: string | null;
+      bootedAt: string | null;
+      tickCount: number;
+    };
+    warmup: {
+      ok: boolean;
+      dj420Status: string;
+      cachedTrackCount: number;
+      currentTrack: string;
+      currentOffsetSeconds: number;
+      nextTrack: string | null;
+      listenerCount: number;
+    };
+    nowPlaying: {
+      title: string;
+      videoId: string;
+      offsetSeconds: number;
+      nextTitle: string | null;
+      activePlaylist: string;
+      thumbnail: string | null;
+    };
+  };
 };
 
 export default function FmAdminClient() {
@@ -127,6 +152,48 @@ export default function FmAdminClient() {
           <h1 className="text-2xl font-bold text-white">LeafLock FM Admin</h1>
           <p className="mt-1 text-sm text-zinc-400">Mode: {data.control.mode}</p>
         </header>
+
+        {data.dj420 ? (
+          <section className="fm-glass p-5">
+            <h2 className="font-semibold text-white">DJ420 Host Panel</h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              Status: {data.dj420.dj420.status} · Last heartbeat:{" "}
+              {data.dj420.dj420.lastHeartbeat ?? "—"}
+            </p>
+            <div className="mt-3 grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
+              <p>Current: {data.dj420.nowPlaying.title}</p>
+              <p>Offset: {data.dj420.nowPlaying.offsetSeconds}s</p>
+              <p>Next: {data.dj420.nowPlaying.nextTitle ?? "—"}</p>
+              <p>Playlist: {data.dj420.nowPlaying.activePlaylist}</p>
+              <p>Cached tracks: {data.dj420.warmup.cachedTrackCount}</p>
+              <p>Listeners: {data.dj420.warmup.listenerCount}</p>
+              <p>Warmup: {data.dj420.warmup.ok ? "ok" : "needs attention"}</p>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void action({ action: "restart-dj420" })}
+                className="fm-btn-nav"
+              >
+                Restart DJ420 Host
+              </button>
+              <button
+                type="button"
+                onClick={() => void action({ action: "force-next" })}
+                className="fm-btn-nav"
+              >
+                Force Next Track
+              </button>
+              <button
+                type="button"
+                onClick={() => void action({ action: "run-warmup" })}
+                className="fm-btn-nav"
+              >
+                Run Warmup Now
+              </button>
+            </div>
+          </section>
+        ) : null}
 
         <section className="fm-glass p-5">
           <h2 className="font-semibold text-white">Station Control</h2>

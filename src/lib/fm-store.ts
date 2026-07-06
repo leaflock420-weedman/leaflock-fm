@@ -89,7 +89,20 @@ export type LiveListener = {
   displayName?: string;
   instagram?: string;
   lastSeenAt: string;
+  role?: "station_host" | "listener";
+  type?: "internal_host" | "public";
 };
+
+export const DJ420_LISTENER_ID = "dj420-station-host";
+export const DJ420_DISPLAY_NAME = "DJ420";
+
+export function isInternalHost(listener: LiveListener): boolean {
+  return (
+    listener.id === DJ420_LISTENER_ID ||
+    listener.role === "station_host" ||
+    listener.type === "internal_host"
+  );
+}
 
 export type OwnerQueueItem = {
   id: string;
@@ -462,6 +475,38 @@ export async function getLiveListeners(): Promise<LiveListener[]> {
   return listeners
     .filter((item) => Date.now() - new Date(item.lastSeenAt).getTime() <= LISTENER_TTL_MS)
     .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+}
+
+export async function getPublicLiveListeners(): Promise<LiveListener[]> {
+  const listeners = await getLiveListeners();
+  return listeners.filter((item) => !isInternalHost(item));
+}
+
+export async function ensureDj420Presence(): Promise<LiveListener> {
+  const listeners = await readJsonFile<LiveListener[]>(LISTENERS_PATH, []);
+  const now = new Date().toISOString();
+  const entry: LiveListener = {
+    id: DJ420_LISTENER_ID,
+    displayName: DJ420_DISPLAY_NAME,
+    lastSeenAt: now,
+    role: "station_host",
+    type: "internal_host"
+  };
+
+  const index = listeners.findIndex((item) => item.id === DJ420_LISTENER_ID);
+  if (index >= 0) {
+    listeners[index] = entry;
+  } else {
+    listeners.unshift(entry);
+  }
+
+  const fresh = listeners.filter(
+    (item) =>
+      isInternalHost(item) ||
+      Date.now() - new Date(item.lastSeenAt).getTime() <= LISTENER_TTL_MS
+  );
+  await writeJsonFile(LISTENERS_PATH, fresh.slice(0, 100));
+  return entry;
 }
 
 export async function getTrackRequests(limit = 20): Promise<TrackRequest[]> {

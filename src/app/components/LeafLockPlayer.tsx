@@ -262,6 +262,7 @@ type PublicStationPayload = {
     requestCredit?: string | null;
   };
   offsetSeconds: number;
+  currentOffsetSeconds?: number;
   upNext: string | null;
   requestCredit: string | null;
   listenerCount?: number;
@@ -270,6 +271,10 @@ type PublicStationPayload = {
   trackStartedAt?: string;
   serverTime?: string;
   durationSec?: number;
+  hostName?: string;
+  hostStatus?: "online" | "offline";
+  thumbnail?: string | null;
+  activePlaylist?: string;
 };
 
 export default function LeafLockPlayer({
@@ -964,7 +969,7 @@ export default function LeafLockPlayer({
   useEffect(() => {
     listenModeRef.current = listenMode;
     if (listenMode === "live") {
-      setLiveRoomLabel("Live room — synced with everyone");
+      setLiveRoomLabel("DJ420 is hosting");
       stationRevisionRef.current = -1;
       liveStationJoinedRef.current = false;
     } else {
@@ -1040,9 +1045,11 @@ export default function LeafLockPlayer({
       setRequestCredit(station.requestCredit);
       setUpNext(station.upNext ?? station.nextTitle ?? null);
       setLiveRoomLabel(
-        station.listenerCount && station.listenerCount > 0
-          ? `Live room — ${station.listenerCount} listening`
-          : "Live room — synced with everyone"
+        station.hostStatus === "online"
+          ? station.listenerCount && station.listenerCount > 0
+            ? `DJ420 is hosting — ${station.listenerCount} listening`
+            : "DJ420 is hosting"
+          : "Station host reconnecting"
       );
 
       if (!revisionChanged && !videoChanged && !options?.resumePlayback && !options?.initialCue) {
@@ -1062,7 +1069,7 @@ export default function LeafLockPlayer({
 
       setTrackUi(video, track.artist ?? "LeafLock FM");
 
-      const resumeAt = Math.max(0, station.offsetSeconds);
+      const resumeAt = Math.max(0, station.currentOffsetSeconds ?? station.offsetSeconds);
       const startPlayback = () => {
         try {
           if (resumeAt > 0.5) {
@@ -1120,51 +1127,25 @@ export default function LeafLockPlayer({
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  const resumeBackgroundPlayback = useCallback(() => {
-    if (userPlaybackIntentRef.current !== "playing" || !isPlayingRef.current) return;
-
-    void syncMediaBridge(true);
-    const active = getActivePlayer();
-    if (active) {
-      try {
-        const YT = window.YT;
-        const state = active.getPlayerState?.();
-        const alreadyPlaying =
-          state === YT?.PlayerState.PLAYING || state === YT?.PlayerState.BUFFERING;
-        if (!alreadyPlaying) {
-          active.playVideo();
-        }
-        applyDeckVolume(activeDeckRef.current, 1);
-      } catch {
-        // Player may not be ready yet.
-      }
-    }
-  }, [applyDeckVolume, getActivePlayer, syncMediaBridge]);
-
   useEffect(() => {
     const onVisibility = () => {
-      if (userPlaybackIntentRef.current === "playing") {
-        resumeBackgroundPlayback();
-      }
+      if (userPlaybackIntentRef.current !== "playing") return;
+      void syncMediaBridge(isPlayingRef.current);
+    };
+
+    const onPageHide = () => {
+      userPlaybackIntentRef.current = "stopped";
+      persistLivePlaying(false);
     };
 
     window.addEventListener("visibilitychange", onVisibility);
-
-    const keepAliveId = window.setInterval(() => {
-      if (
-        document.visibilityState === "hidden" &&
-        userPlaybackIntentRef.current === "playing" &&
-        isPlayingRef.current
-      ) {
-        resumeBackgroundPlayback();
-      }
-    }, 4000);
+    window.addEventListener("pagehide", onPageHide);
 
     return () => {
       window.removeEventListener("visibilitychange", onVisibility);
-      window.clearInterval(keepAliveId);
+      window.removeEventListener("pagehide", onPageHide);
     };
-  }, [resumeBackgroundPlayback]);
+  }, [syncMediaBridge]);
 
   useEffect(() => {
     if (listenMode !== "live" || !playlistReady || !playersReady) return;
@@ -1191,9 +1172,11 @@ export default function LeafLockPlayer({
         setUpNext(station.upNext);
         setRequestCredit(station.requestCredit);
         setLiveRoomLabel(
-          station.listenerCount && station.listenerCount > 0
-            ? `Live room — ${station.listenerCount} listening`
-            : "Live room — synced with everyone"
+          station.hostStatus === "online"
+            ? station.listenerCount && station.listenerCount > 0
+              ? `DJ420 is hosting — ${station.listenerCount} listening`
+              : "DJ420 is hosting"
+            : "Station host reconnecting"
         );
 
         if (isSeekingRef.current || blendInProgressRef.current) return;
@@ -1205,10 +1188,11 @@ export default function LeafLockPlayer({
           localTime = 0;
         }
 
-        const drift = Math.abs(localTime - station.offsetSeconds);
+        const serverOffset = station.currentOffsetSeconds ?? station.offsetSeconds;
+        const drift = Math.abs(localTime - serverOffset);
         if (drift > 6) {
           try {
-            player.seekTo(station.offsetSeconds, true);
+            player.seekTo(serverOffset, true);
           } catch {
             // Player may not be ready to seek yet.
           }
@@ -1225,6 +1209,26 @@ export default function LeafLockPlayer({
 
     return () => window.clearInterval(intervalId);
   }, [applyLiveStationTrack, getActivePlayer, listenMode, playlistReady, playersReady]);
+
+  useEffect(() => {
+    if (listenMode !== "live" || !playersReady) return;
+
+    const source = new EventSource("/api/fm/conductor/events");
+    source.addEventListener("station", (event) => {
+      try {
+        const station = JSON.parse(event.data) as PublicStationPayload;
+        if (!station.current?.videoId) return;
+        applyLiveStationTrackRef.current(station, {
+          forceReload: true,
+          resumePlayback: userPlaybackIntentRef.current === "playing"
+        });
+      } catch {
+        // Ignore malformed SSE payloads.
+      }
+    });
+
+    return () => source.close();
+  }, [listenMode, playersReady]);
 
   useEffect(() => {
     if (listenMode !== "solo" || !playlistReady) return;
@@ -1262,13 +1266,48 @@ export default function LeafLockPlayer({
       try {
         if (listenModeRef.current === "live") {
           const nowPlaying = await fetchLiveStation();
-          if (!cancelled && nowPlaying.current?.videoId) {
+          if (cancelled) return;
+
+          const videos: PlaylistVideo[] = [];
+          if (nowPlaying.current?.videoId) {
+            videos.push({
+              id: nowPlaying.current.videoId,
+              title: nowPlaying.current.title,
+              channelTitle: nowPlaying.current.artist,
+              durationSec: nowPlaying.current.durationSec ?? nowPlaying.durationSec
+            });
+          }
+          if (nowPlaying.nextVideoId) {
+            videos.push({
+              id: nowPlaying.nextVideoId,
+              title: nowPlaying.nextTitle ?? "Up next",
+              channelTitle: "LeafLock FM"
+            });
+          }
+
+          const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
+          const config = (await configResponse.json()) as {
+            playlistId?: string;
+          };
+          const activePlaylistId = nowPlaying.activePlaylist ?? config.playlistId ?? "";
+
+          setPlaylistId(activePlaylistId);
+          playlistIdRef.current = activePlaylistId;
+          playlistRef.current = videos;
+          playlistSetRef.current = new Set(videos.map((video) => video.id));
+          rotationQueueRef.current = videos;
+          rotationIndexRef.current = 0;
+          setPlaylistCount(videos.length);
+          setPlaylistReady(true);
+
+          if (nowPlaying.current?.videoId) {
             setNowPlaying({
               title: nowPlaying.current.title,
               artist: nowPlaying.current.artist ?? "LeafLock FM — Live"
             });
             setUpNext(nowPlaying.upNext ?? nowPlaying.nextTitle ?? null);
           }
+          return;
         }
 
         const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
@@ -1316,12 +1355,10 @@ export default function LeafLockPlayer({
         prefetchedNextRef.current = null;
         setPlaylistCount(payload.count ?? payload.videos.length);
         setPlaylistReady(true);
-        if (listenModeRef.current !== "live") {
-          setNowPlaying({
-            title: "Ready to shuffle",
-            artist: `${payload.videos.length} tracks in rotation`
-          });
-        }
+        setNowPlaying({
+          title: "Ready to shuffle",
+          artist: `${payload.videos.length} tracks in rotation`
+        });
       } catch (error) {
         if (!cancelled) {
           setPlaybackError(
@@ -1667,6 +1704,16 @@ export default function LeafLockPlayer({
     playNextTrackFromGesture();
   };
 
+  const resyncLiveFromServer = useCallback(() => {
+    void fetchLiveStation()
+      .then((station) => {
+        applyLiveStationTrackRef.current(station, {
+          resumePlayback: userPlaybackIntentRef.current === "playing"
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
   const bindMediaSession = useCallback(() => {
     if (!("mediaSession" in navigator)) return;
 
@@ -1703,15 +1750,38 @@ export default function LeafLockPlayer({
         updateMediaSessionRef.current(false);
       });
       navigator.mediaSession.setActionHandler("previoustrack", () => {
+        if (listenModeRef.current === "live") {
+          resyncLiveFromServer();
+          return;
+        }
         playPreviousRef.current();
       });
       navigator.mediaSession.setActionHandler("nexttrack", () => {
+        if (listenModeRef.current === "live") {
+          resyncLiveFromServer();
+          return;
+        }
         playNextRef.current();
+      });
+      navigator.mediaSession.setActionHandler("seekto", () => {
+        if (listenModeRef.current === "live") {
+          resyncLiveFromServer();
+        }
+      });
+      navigator.mediaSession.setActionHandler("seekforward", () => {
+        if (listenModeRef.current === "live") {
+          resyncLiveFromServer();
+        }
+      });
+      navigator.mediaSession.setActionHandler("seekbackward", () => {
+        if (listenModeRef.current === "live") {
+          resyncLiveFromServer();
+        }
       });
     } catch {
       // Some browsers reject handler registration until playback starts.
     }
-  }, [getActivePlayer, stopTimePolling, syncMediaBridge]);
+  }, [getActivePlayer, resyncLiveFromServer, stopTimePolling, syncMediaBridge]);
 
   const updateMediaSession = useCallback(
     (playing: boolean) => {
