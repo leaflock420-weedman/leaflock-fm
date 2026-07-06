@@ -138,7 +138,7 @@ export default function FmListenMode() {
         ) : null}
       </div>
 
-      <LeafLockPlayer mode="simple" listenMode={mode} />
+      <LeafLockPlayer key={mode} mode="simple" listenMode={mode} />
 
       {mode === "live" ? (
         <JukeboxForm sharedRoom />

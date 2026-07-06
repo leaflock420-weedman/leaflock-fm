@@ -99,6 +99,27 @@ declare global {
 const BLEND_ENABLED_KEY = "leaflock-dj-blend-enabled";
 const SHOW_VIDEO_KEY = "leaflock-show-video";
 const LIVE_PLAYING_KEY = "leaflock-live-was-playing";
+const PLAYBACK_INTENT_KEY = "leaflock-playback-intent";
+
+function persistPlaybackIntent(intent: "playing" | "paused" | "stopped") {
+  try {
+    window.sessionStorage.setItem(PLAYBACK_INTENT_KEY, intent);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function readPlaybackIntent(): "playing" | "paused" | "stopped" {
+  try {
+    const stored = window.sessionStorage.getItem(PLAYBACK_INTENT_KEY);
+    if (stored === "playing" || stored === "paused" || stored === "stopped") {
+      return stored;
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+  return "stopped";
+}
 
 function persistLivePlaying(playing: boolean) {
   try {
@@ -622,22 +643,34 @@ export default function LeafLockPlayer({
   const startIncomingPlayback = useCallback(
     (incoming: YTPlayer, incomingDeck: DeckId, video: PlaylistVideo) => {
       const cuedId = deckVideoIdRef.current[incomingDeck];
+      const shouldPlay = userPlaybackIntentRef.current === "playing";
 
       try {
         if (cuedId === video.id) {
-          incoming.seekTo(0, true);
-        } else {
+          if (shouldPlay) {
+            incoming.seekTo(0, true);
+          }
+        } else if (shouldPlay) {
           incoming.loadVideoById(video.id);
+          deckVideoIdRef.current[incomingDeck] = video.id;
+        } else {
+          incoming.cueVideoById(video.id);
           deckVideoIdRef.current[incomingDeck] = video.id;
         }
       } catch {
-        incoming.loadVideoById(video.id);
+        if (shouldPlay) {
+          incoming.loadVideoById(video.id);
+        } else {
+          incoming.cueVideoById(video.id);
+        }
         deckVideoIdRef.current[incomingDeck] = video.id;
       }
 
       incoming.unMute();
       incoming.setVolume(0);
-      incoming.playVideo();
+      if (shouldPlay) {
+        incoming.playVideo();
+      }
     },
     []
   );
@@ -697,13 +730,21 @@ export default function LeafLockPlayer({
       blendInProgressRef.current = false;
       setIsBlending(false);
       setIsBuffering(false);
-      isPlayingRef.current = true;
-      setIsPlaying(true);
-      setIsConnected(true);
+      const shouldPlay = userPlaybackIntentRef.current === "playing";
+      isPlayingRef.current = shouldPlay;
+      setIsPlaying(shouldPlay);
+      setIsConnected(shouldPlay);
+      if (!shouldPlay) {
+        getDeckPlayer(incomingDeck)?.pauseVideo();
+        stopTimePollingRef.current();
+      }
       resetPlaybackProgress();
       setTrackUi(video);
       updateNowPlayingFromActiveDeck();
-      startTimePollingRef.current();
+      if (shouldPlay) {
+        startTimePollingRef.current();
+      }
+      updateMediaSessionRef.current(shouldPlay);
 
       const upcoming = peekNextScheduledTrack();
       if (upcoming) {
@@ -715,6 +756,7 @@ export default function LeafLockPlayer({
     [
       applyDeckVolume,
       clearBlendFallbackTimer,
+      getDeckPlayer,
       peekNextScheduledTrack,
       prefetchOnInactiveDeck,
       refreshUpNextLabel,
@@ -801,22 +843,36 @@ export default function LeafLockPlayer({
   );
 
   const playInstantOnActiveDeck = useCallback(
-    (video: PlaylistVideo, options?: { recordHistory?: boolean }) => {
+    (
+      video: PlaylistVideo,
+      options?: { recordHistory?: boolean; forcePlay?: boolean }
+    ) => {
       cancelActiveCrossfade();
       const deck = activeDeckRef.current;
       const player = getDeckPlayer(deck);
       if (!player || !playersReadyRef.current[deck]) return false;
 
-      const { recordHistory = true } = options ?? {};
+      const { recordHistory = true, forcePlay = false } = options ?? {};
+      const shouldPlay = forcePlay || userPlaybackIntentRef.current === "playing";
 
       setPlaybackError(null);
-      setIsBuffering(true);
+      setIsBuffering(shouldPlay);
       resetPlaybackProgress();
       setTrackUi(video);
-      player.loadVideoById(video.id);
-      deckVideoIdRef.current[deck] = video.id;
-      player.playVideo();
-      applyDeckVolume(deck, 1);
+      if (shouldPlay) {
+        player.loadVideoById(video.id);
+        deckVideoIdRef.current[deck] = video.id;
+        player.playVideo();
+        applyDeckVolume(deck, 1);
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+        setIsConnected(true);
+      } else {
+        player.cueVideoById(video.id);
+        deckVideoIdRef.current[deck] = video.id;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      }
 
       if (recordHistory) {
         savePlayHistory(video.id);
@@ -852,15 +908,21 @@ export default function LeafLockPlayer({
       return false;
     }
 
-    if (blendEnabledRef.current && isPlayingRef.current) {
+    const shouldPlay = userPlaybackIntentRef.current === "playing";
+
+    if (blendEnabledRef.current && shouldPlay && isPlayingRef.current) {
       return beginBlendToVideo(next);
     }
 
     queueNextTrack(next);
-    return playInstantOnActiveDeck(next);
+    return playInstantOnActiveDeck(next, { forcePlay: shouldPlay });
   }, [beginBlendToVideo, playInstantOnActiveDeck, queueNextTrack, resolveNextTrack]);
 
   const playNextTrackAuto = useCallback(() => {
+    if (userPlaybackIntentRef.current !== "playing") {
+      return;
+    }
+
     const next = resolveNextTrack();
     if (!next) {
       setPlaybackError("Playlist is empty.");
@@ -1135,6 +1197,7 @@ export default function LeafLockPlayer({
 
     const onPageHide = () => {
       userPlaybackIntentRef.current = "stopped";
+      persistPlaybackIntent("stopped");
       persistLivePlaying(false);
     };
 
@@ -1260,6 +1323,10 @@ export default function LeafLockPlayer({
   }, []);
 
   useEffect(() => {
+    userPlaybackIntentRef.current = readPlaybackIntent();
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function bootstrap() {
@@ -1374,7 +1441,7 @@ export default function LeafLockPlayer({
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, [mode, listenMode]);
 
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
@@ -1443,6 +1510,17 @@ export default function LeafLockPlayer({
                   }
                 } catch {
                   // Player may not expose metadata yet.
+                }
+
+                if (
+                  deck === activeDeckRef.current &&
+                  userPlaybackIntentRef.current !== "playing"
+                ) {
+                  event.target.pauseVideo();
+                  isPlayingRef.current = false;
+                  setIsPlaying(false);
+                  updateMediaSessionRef.current(false);
+                  return;
                 }
 
                 isPlayingRef.current = true;
@@ -1646,6 +1724,7 @@ export default function LeafLockPlayer({
 
     if (isPlaying) {
       userPlaybackIntentRef.current = "paused";
+      persistPlaybackIntent("paused");
       if (listenModeRef.current === "live") {
         persistLivePlaying(false);
       }
@@ -1662,6 +1741,7 @@ export default function LeafLockPlayer({
     }
 
     userPlaybackIntentRef.current = "playing";
+    persistPlaybackIntent("playing");
     if (listenModeRef.current === "live") {
       persistLivePlaying(true);
     }
@@ -1720,6 +1800,7 @@ export default function LeafLockPlayer({
     try {
       navigator.mediaSession.setActionHandler("play", () => {
         userPlaybackIntentRef.current = "playing";
+        persistPlaybackIntent("playing");
         if (listenModeRef.current === "live") {
           persistLivePlaying(true);
         }
@@ -1728,6 +1809,7 @@ export default function LeafLockPlayer({
       });
       navigator.mediaSession.setActionHandler("pause", () => {
         userPlaybackIntentRef.current = "paused";
+        persistPlaybackIntent("paused");
         if (listenModeRef.current === "live") {
           persistLivePlaying(false);
         }
@@ -1740,6 +1822,7 @@ export default function LeafLockPlayer({
       });
       navigator.mediaSession.setActionHandler("stop", () => {
         userPlaybackIntentRef.current = "stopped";
+        persistPlaybackIntent("stopped");
         persistLivePlaying(false);
         playersRef.current.a?.pauseVideo();
         playersRef.current.b?.pauseVideo();
@@ -1787,10 +1870,17 @@ export default function LeafLockPlayer({
     (playing: boolean) => {
       if (!("mediaSession" in navigator)) return;
 
+      const album =
+        listenModeRef.current === "live"
+          ? "Locked In Radio"
+          : djBlendEnabled
+            ? "LeafLock FM DJ Blend"
+            : "Private Jukebox";
+
       navigator.mediaSession.metadata = new MediaMetadata({
         title: nowPlaying.title,
         artist: nowPlaying.artist,
-        album: djBlendEnabled ? "LeafLock FM DJ Blend" : "LeafLock FM Shuffle",
+        album,
         artwork: youtubeArtwork(currentVideoIdRef.current)
       });
       navigator.mediaSession.playbackState = playing ? "playing" : "paused";
