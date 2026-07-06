@@ -4,8 +4,8 @@ services:
     runtime: node
     # Paid Starter — always-on (no free-tier cold starts)
     plan: starter
-    buildCommand: npm ci && npm run build
-    startCommand: npm run start:standalone
+    buildCommand: npm install && npm run build
+    startCommand: npm start
     healthCheckPath: /fm
     numInstances: 1
     domains:
