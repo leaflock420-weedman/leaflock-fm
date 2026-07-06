@@ -545,11 +545,14 @@ export default function LeafLockPlayer({
     bridge.volume = 0.001;
     bridge.muted = false;
 
-    if (playing) {
+    const keepBridgeAlive =
+      playing || userPlaybackIntentRef.current === "playing";
+
+    if (keepBridgeAlive) {
       try {
         await bridge.play();
       } catch {
-        // Bridge play can fail before a user gesture; retry on next play tap.
+        // Bridge play can fail before a user gesture; retry on next resume.
       }
     } else {
       bridge.pause();
@@ -1193,33 +1196,44 @@ export default function LeafLockPlayer({
       setIsPlaying(true);
       setIsConnected(true);
       startTimePollingRef.current();
+      updateMediaSessionRef.current(true);
     } catch {
       // Player may not be ready yet.
     }
   }, [applyDeckVolume, getActivePlayer, syncMediaBridge]);
 
+  const resumeBackgroundPlaybackRef = useRef(resumeBackgroundPlayback);
+
   useEffect(() => {
-    const onVisibility = () => {
+    resumeBackgroundPlaybackRef.current = resumeBackgroundPlayback;
+  }, [resumeBackgroundPlayback]);
+
+  useEffect(() => {
+    const onBackgroundResume = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
-      resumeBackgroundPlayback();
+      resumeBackgroundPlaybackRef.current();
     };
 
-    window.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener("visibilitychange", onBackgroundResume);
+    window.addEventListener("pagehide", onBackgroundResume);
+    window.addEventListener("pageshow", onBackgroundResume);
+    window.addEventListener("focus", onBackgroundResume);
 
     const keepAliveId = window.setInterval(() => {
-      if (
-        document.visibilityState === "hidden" &&
-        userPlaybackIntentRef.current === "playing"
-      ) {
-        resumeBackgroundPlayback();
+      if (userPlaybackIntentRef.current !== "playing") return;
+      if (document.visibilityState === "hidden") {
+        resumeBackgroundPlaybackRef.current();
       }
-    }, 4000);
+    }, 2000);
 
     return () => {
-      window.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("visibilitychange", onBackgroundResume);
+      window.removeEventListener("pagehide", onBackgroundResume);
+      window.removeEventListener("pageshow", onBackgroundResume);
+      window.removeEventListener("focus", onBackgroundResume);
       window.clearInterval(keepAliveId);
     };
-  }, [resumeBackgroundPlayback]);
+  }, []);
 
   useEffect(() => {
     if (listenMode !== "live" || !playlistReady || !playersReady) return;
@@ -1555,6 +1569,10 @@ export default function LeafLockPlayer({
                 if (deck === activeDeckRef.current && !blendInProgressRef.current) {
                   // Android pauses YouTube in background while user intent is still "playing".
                   if (userPlaybackIntentRef.current === "playing") {
+                    void syncMediaBridge(true);
+                    window.setTimeout(() => {
+                      resumeBackgroundPlaybackRef.current();
+                    }, 80);
                     return;
                   }
                   isPlayingRef.current = false;
@@ -1916,11 +1934,15 @@ export default function LeafLockPlayer({
 
   useEffect(() => {
     bindMediaSession();
-    updateMediaSession(isPlaying);
+    const sessionPlaying =
+      userPlaybackIntentRef.current === "playing" || isPlaying;
+    updateMediaSession(sessionPlaying);
   }, [bindMediaSession, isPlaying, nowPlaying, updateMediaSession]);
 
   useEffect(() => {
-    void syncMediaBridge(isPlaying);
+    const bridgePlaying =
+      userPlaybackIntentRef.current === "playing" || isPlaying;
+    void syncMediaBridge(bridgePlaying);
   }, [isPlaying, syncMediaBridge]);
 
   useEffect(() => {
