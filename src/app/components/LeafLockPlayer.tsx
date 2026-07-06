@@ -353,6 +353,7 @@ export default function LeafLockPlayer({
   const stationEndedAtRef = useRef(0);
   const listenModeRef = useRef(listenMode);
   const userPlaybackIntentRef = useRef<"playing" | "paused" | "stopped">("stopped");
+  const backgroundPauseSuppressUntilRef = useRef(0);
   const liveStationJoinedRef = useRef(false);
 
   const syncPreviousState = useCallback(() => {
@@ -542,20 +543,21 @@ export default function LeafLockPlayer({
     const bridge = mediaBridgeRef.current;
     if (!bridge) return;
 
-    bridge.volume = 0.001;
-    bridge.muted = false;
-
     const keepBridgeAlive =
       playing || userPlaybackIntentRef.current === "playing";
 
-    if (keepBridgeAlive) {
-      try {
-        await bridge.play();
-      } catch {
-        // Bridge play can fail before a user gesture; retry on next resume.
-      }
-    } else {
+    if (!keepBridgeAlive) {
       bridge.pause();
+      return;
+    }
+
+    bridge.volume = 0.001;
+    bridge.muted = false;
+
+    try {
+      await bridge.play();
+    } catch {
+      // Bridge play can fail before a user gesture; retry on keepalive.
     }
   }, []);
 
@@ -1211,10 +1213,14 @@ export default function LeafLockPlayer({
   useEffect(() => {
     const onBackgroundResume = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
+      if (document.visibilityState === "hidden") {
+        backgroundPauseSuppressUntilRef.current = Date.now() + 2000;
+      }
+      void syncMediaBridge(true);
       resumeBackgroundPlaybackRef.current();
     };
 
-    document.addEventListener("visibilitychange", onBackgroundResume);
+    document.addEventListener("visibilitychange", onBackgroundResume, true);
     window.addEventListener("pagehide", onBackgroundResume);
     window.addEventListener("pageshow", onBackgroundResume);
     window.addEventListener("focus", onBackgroundResume);
@@ -1222,18 +1228,19 @@ export default function LeafLockPlayer({
     const keepAliveId = window.setInterval(() => {
       if (userPlaybackIntentRef.current !== "playing") return;
       if (document.visibilityState === "hidden") {
+        void syncMediaBridge(true);
         resumeBackgroundPlaybackRef.current();
       }
-    }, 2000);
+    }, 1000);
 
     return () => {
-      document.removeEventListener("visibilitychange", onBackgroundResume);
+      document.removeEventListener("visibilitychange", onBackgroundResume, true);
       window.removeEventListener("pagehide", onBackgroundResume);
       window.removeEventListener("pageshow", onBackgroundResume);
       window.removeEventListener("focus", onBackgroundResume);
       window.clearInterval(keepAliveId);
     };
-  }, []);
+  }, [syncMediaBridge]);
 
   useEffect(() => {
     if (listenMode !== "live" || !playlistReady || !playersReady) return;
@@ -1467,6 +1474,7 @@ export default function LeafLockPlayer({
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
   const playNextRef = useRef<() => boolean>(() => false);
+  const handleUserPauseRef = useRef<() => void>(() => {});
   const bindMediaSessionRef = useRef<() => void>(() => {});
   const updateMediaSessionRef = useRef<(playing: boolean) => void>(() => {});
   useEffect(() => {
@@ -1570,9 +1578,7 @@ export default function LeafLockPlayer({
                   // Android pauses YouTube in background while user intent is still "playing".
                   if (userPlaybackIntentRef.current === "playing") {
                     void syncMediaBridge(true);
-                    window.setTimeout(() => {
-                      resumeBackgroundPlaybackRef.current();
-                    }, 80);
+                    resumeBackgroundPlaybackRef.current();
                     return;
                   }
                   isPlayingRef.current = false;
@@ -1757,19 +1763,7 @@ export default function LeafLockPlayer({
     }
 
     if (isPlaying) {
-      userPlaybackIntentRef.current = "paused";
-      if (listenModeRef.current === "live") {
-        persistLivePlaying(false);
-      }
-      cancelActiveCrossfade();
-      playersRef.current.a?.pauseVideo();
-      playersRef.current.b?.pauseVideo();
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      syncPlaybackProgress();
-      stopTimePolling();
-      void syncMediaBridge(false);
-      updateMediaSessionRef.current(false);
+      handleUserPauseRef.current();
       return;
     }
 
@@ -1826,6 +1820,26 @@ export default function LeafLockPlayer({
       .catch(() => undefined);
   }, []);
 
+  const handleUserPause = useCallback(() => {
+    userPlaybackIntentRef.current = "paused";
+    if (listenModeRef.current === "live") {
+      persistLivePlaying(false);
+    }
+    cancelActiveCrossfade();
+    playersRef.current.a?.pauseVideo();
+    playersRef.current.b?.pauseVideo();
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    syncPlaybackProgress();
+    stopTimePolling();
+    void syncMediaBridge(false);
+    updateMediaSessionRef.current(false);
+  }, [cancelActiveCrossfade, stopTimePolling, syncMediaBridge, syncPlaybackProgress]);
+
+  useEffect(() => {
+    handleUserPauseRef.current = handleUserPause;
+  }, [handleUserPause]);
+
   const bindMediaSession = useCallback(() => {
     if (!("mediaSession" in navigator)) return;
 
@@ -1839,16 +1853,18 @@ export default function LeafLockPlayer({
         togglePlayRef.current();
       });
       navigator.mediaSession.setActionHandler("pause", () => {
-        userPlaybackIntentRef.current = "paused";
-        if (listenModeRef.current === "live") {
-          persistLivePlaying(false);
+        const spuriousBackgroundPause =
+          userPlaybackIntentRef.current === "playing" &&
+          (document.visibilityState === "hidden" ||
+            Date.now() < backgroundPauseSuppressUntilRef.current);
+
+        if (spuriousBackgroundPause) {
+          void syncMediaBridge(true);
+          resumeBackgroundPlaybackRef.current();
+          return;
         }
-        getActivePlayer()?.pauseVideo();
-        isPlayingRef.current = false;
-        setIsPlaying(false);
-        stopTimePolling();
-        void syncMediaBridge(false);
-        updateMediaSessionRef.current(false);
+
+        handleUserPauseRef.current();
       });
       navigator.mediaSession.setActionHandler("stop", () => {
         userPlaybackIntentRef.current = "stopped";
@@ -1893,7 +1909,7 @@ export default function LeafLockPlayer({
     } catch {
       // Some browsers reject handler registration until playback starts.
     }
-  }, [getActivePlayer, resyncLiveFromServer, stopTimePolling, syncMediaBridge]);
+  }, [resyncLiveFromServer, syncMediaBridge]);
 
   const updateMediaSession = useCallback(
     (playing: boolean) => {
@@ -1934,16 +1950,23 @@ export default function LeafLockPlayer({
 
   useEffect(() => {
     bindMediaSession();
-    const sessionPlaying =
-      userPlaybackIntentRef.current === "playing" || isPlaying;
-    updateMediaSession(sessionPlaying);
+    const sessionPlaying = userPlaybackIntentRef.current === "playing";
+    updateMediaSession(sessionPlaying || isPlaying);
   }, [bindMediaSession, isPlaying, nowPlaying, updateMediaSession]);
 
   useEffect(() => {
-    const bridgePlaying =
-      userPlaybackIntentRef.current === "playing" || isPlaying;
-    void syncMediaBridge(bridgePlaying);
-  }, [isPlaying, syncMediaBridge]);
+    const bridge = mediaBridgeRef.current;
+    if (!bridge) return;
+
+    const onBridgePaused = () => {
+      if (userPlaybackIntentRef.current !== "playing") return;
+      void syncMediaBridge(true);
+      resumeBackgroundPlaybackRef.current();
+    };
+
+    bridge.addEventListener("pause", onBridgePaused);
+    return () => bridge.removeEventListener("pause", onBridgePaused);
+  }, [syncMediaBridge]);
 
   useEffect(() => {
     setPortalReady(true);
@@ -2402,7 +2425,14 @@ export default function LeafLockPlayer({
         aria-hidden
         onPlay={() => {
           bindMediaSessionRef.current();
-          updateMediaSessionRef.current(isPlayingRef.current);
+          updateMediaSessionRef.current(
+            userPlaybackIntentRef.current === "playing" || isPlayingRef.current
+          );
+        }}
+        onPause={() => {
+          if (userPlaybackIntentRef.current !== "playing") return;
+          void syncMediaBridge(true);
+          resumeBackgroundPlaybackRef.current();
         }}
       />
     </div>
