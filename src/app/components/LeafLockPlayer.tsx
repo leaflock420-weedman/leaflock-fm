@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import LoveButton from "@/components/LoveButton";
 import LeafLockLogo from "@/components/LeafLockLogo";
-import FmEqualizer from "@/components/fm/FmEqualizer";
 import {
   BLEND_POLL_INTERVAL_MS,
   TOTAL_BLEND_MS,
@@ -243,8 +242,8 @@ export default function LeafLockPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(85);
   const [nowPlaying, setNowPlaying] = useState({
-    title: "LeafLock FM 104.2",
-    artist: "Locked In Radio"
+    title: "LeafLock FM 104.2 — Shuffle",
+    artist: "Loading playlist..."
   });
   const [upNext, setUpNext] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -270,8 +269,6 @@ export default function LeafLockPlayer({
   const [activeDeck, setActiveDeck] = useState<DeckId>("a");
   const [requestCredit, setRequestCredit] = useState<string | null>(null);
   const [liveRoomLabel, setLiveRoomLabel] = useState<string | null>(null);
-  const [playlistLoadFailed, setPlaylistLoadFailed] = useState(false);
-  const [bootstrapKey, setBootstrapKey] = useState(0);
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const videoShellRef = useRef<HTMLDivElement | null>(null);
@@ -306,6 +303,7 @@ export default function LeafLockPlayer({
   const stationRevisionRef = useRef(-1);
   const stationEndedAtRef = useRef(0);
   const listenModeRef = useRef(listenMode);
+  const userPlaybackIntentRef = useRef<"playing" | "paused" | "stopped">("stopped");
 
   const syncPreviousState = useCallback(() => {
     setCanGoPrevious(sessionIndexRef.current > 0);
@@ -1016,6 +1014,14 @@ export default function LeafLockPlayer({
           if (resumeAt > 0.5) {
             player.seekTo(resumeAt, true);
           }
+          if (userPlaybackIntentRef.current !== "playing") {
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            setIsConnected(true);
+            setIsBuffering(false);
+            updateMediaSessionRef.current(false);
+            return;
+          }
           player.playVideo();
           isPlayingRef.current = true;
           setIsPlaying(true);
@@ -1023,6 +1029,7 @@ export default function LeafLockPlayer({
           setIsBuffering(false);
           applyDeckVolume(deck, 1);
           startTimePollingRef.current();
+          updateMediaSessionRef.current(true);
         } catch {
           // Player may not be ready yet.
         }
@@ -1046,13 +1053,19 @@ export default function LeafLockPlayer({
   }, [applyLiveStationTrack]);
 
   const resumeBackgroundPlayback = useCallback(() => {
-    if (!isPlayingRef.current) return;
+    if (userPlaybackIntentRef.current !== "playing" || !isPlayingRef.current) return;
 
     void syncMediaBridge(true);
     const active = getActivePlayer();
     if (active) {
       try {
-        active.playVideo();
+        const YT = window.YT;
+        const state = active.getPlayerState?.();
+        const alreadyPlaying =
+          state === YT?.PlayerState.PLAYING || state === YT?.PlayerState.BUFFERING;
+        if (!alreadyPlaying) {
+          active.playVideo();
+        }
         applyDeckVolume(activeDeckRef.current, 1);
       } catch {
         // Player may not be ready yet.
@@ -1062,23 +1075,25 @@ export default function LeafLockPlayer({
 
   useEffect(() => {
     const onVisibility = () => {
-      resumeBackgroundPlayback();
+      if (userPlaybackIntentRef.current === "playing") {
+        resumeBackgroundPlayback();
+      }
     };
 
     window.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pagehide", onVisibility);
-    window.addEventListener("focus", onVisibility);
 
     const keepAliveId = window.setInterval(() => {
-      if (document.visibilityState === "hidden" && isPlayingRef.current) {
+      if (
+        document.visibilityState === "hidden" &&
+        userPlaybackIntentRef.current === "playing" &&
+        isPlayingRef.current
+      ) {
         resumeBackgroundPlayback();
       }
     }, 4000);
 
     return () => {
       window.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pagehide", onVisibility);
-      window.removeEventListener("focus", onVisibility);
       window.clearInterval(keepAliveId);
     };
   }, [resumeBackgroundPlayback]);
@@ -1088,7 +1103,7 @@ export default function LeafLockPlayer({
 
     const syncStation = async () => {
       try {
-        const response = await fetch("/api/station-state", { cache: "no-store" });
+        const response = await fetch("/api/fm/station", { cache: "no-store" });
         const station = (await response.json()) as PublicStationPayload;
         if (!station.current?.videoId) return;
 
@@ -1110,6 +1125,8 @@ export default function LeafLockPlayer({
             ? `Live room — ${station.listenerCount} listening`
             : "Live room — synced with everyone"
         );
+
+        if (isSeekingRef.current || blendInProgressRef.current) return;
 
         let localTime = 0;
         try {
@@ -1172,32 +1189,21 @@ export default function LeafLockPlayer({
     let cancelled = false;
 
     async function bootstrap() {
-      setPlaylistLoadFailed(false);
-      setPlaybackError(null);
-      setIsLoadingPlaylist(true);
       try {
-        const stateResponse = await fetch("/api/station-state", { cache: "no-store" });
-        const stationState = (await stateResponse.json()) as {
-          playlistId?: string;
-          mode?: string;
-        };
-
         const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
         const config = (await configResponse.json()) as {
           playlistId?: string;
           simplePlaylistId?: string;
           playlists?: Partial<Record<FmPlayerMode, string>>;
         };
-        const activePlaylistId =
-          stationState.playlistId ||
-          pickPlaylistId(
-            {
-              playlistId: config.playlistId ?? "",
-              simplePlaylistId: config.simplePlaylistId ?? config.playlistId ?? "",
-              playlists: config.playlists ?? {}
-            },
-            mode
-          );
+        const activePlaylistId = pickPlaylistId(
+          {
+            playlistId: config.playlistId ?? "",
+            simplePlaylistId: config.simplePlaylistId ?? config.playlistId ?? "",
+            playlists: config.playlists ?? {}
+          },
+          mode
+        );
 
         if (!activePlaylistId) {
           throw new Error("Playlist is not configured");
@@ -1235,8 +1241,9 @@ export default function LeafLockPlayer({
         });
       } catch (error) {
         if (!cancelled) {
-          setPlaylistLoadFailed(true);
-          setPlaybackError("Couldn't load the playlist. Tap retry.");
+          setPlaybackError(
+            error instanceof Error ? error.message : "Could not load YouTube playlist"
+          );
         }
       } finally {
         if (!cancelled) setIsLoadingPlaylist(false);
@@ -1247,7 +1254,7 @@ export default function LeafLockPlayer({
     return () => {
       cancelled = true;
     };
-  }, [mode, bootstrapKey]);
+  }, [mode]);
 
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
@@ -1352,7 +1359,7 @@ export default function LeafLockPlayer({
                     }
                     stationEndedAtRef.current = now;
 
-                    void fetch("/api/station-state", { cache: "no-store" })
+                    void fetch("/api/fm/station", { cache: "no-store" })
                       .then((response) => response.json())
                       .then((station: PublicStationPayload) => {
                         if (station.current?.videoId !== currentVideoIdRef.current) {
@@ -1476,6 +1483,7 @@ export default function LeafLockPlayer({
     }
 
     if (isPlaying) {
+      userPlaybackIntentRef.current = "paused";
       cancelActiveCrossfade();
       playersRef.current.a?.pauseVideo();
       playersRef.current.b?.pauseVideo();
@@ -1484,15 +1492,17 @@ export default function LeafLockPlayer({
       syncPlaybackProgress();
       stopTimePolling();
       void syncMediaBridge(false);
+      updateMediaSession(false);
       return;
     }
 
+    userPlaybackIntentRef.current = "playing";
     setPlaybackError(null);
     void syncMediaBridge(true);
     bindMediaSession();
 
     if (listenModeRef.current === "live") {
-      void fetch("/api/station-state", { cache: "no-store" })
+      void fetch("/api/fm/station", { cache: "no-store" })
         .then((response) => response.json())
         .then((station: PublicStationPayload) => {
           applyLiveStationTrackRef.current(station, { forceReload: true });
@@ -1532,15 +1542,28 @@ export default function LeafLockPlayer({
 
     try {
       navigator.mediaSession.setActionHandler("play", () => {
+        userPlaybackIntentRef.current = "playing";
         void syncMediaBridge(true);
         togglePlayRef.current();
       });
       navigator.mediaSession.setActionHandler("pause", () => {
+        userPlaybackIntentRef.current = "paused";
         getActivePlayer()?.pauseVideo();
         isPlayingRef.current = false;
         setIsPlaying(false);
         stopTimePolling();
         void syncMediaBridge(false);
+        updateMediaSessionRef.current(false);
+      });
+      navigator.mediaSession.setActionHandler("stop", () => {
+        userPlaybackIntentRef.current = "stopped";
+        playersRef.current.a?.pauseVideo();
+        playersRef.current.b?.pauseVideo();
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        stopTimePolling();
+        void syncMediaBridge(false);
+        updateMediaSessionRef.current(false);
       });
       navigator.mediaSession.setActionHandler("previoustrack", () => {
         playPreviousRef.current();
@@ -1668,9 +1691,12 @@ export default function LeafLockPlayer({
   };
 
   const displayedTime = isSeeking ? scrubTime : currentTime;
-  const canSeek = Boolean(currentTrackId && playersReady && !isBlending && duration > 0);
+  const canSeek =
+    listenMode !== "live" &&
+    Boolean(currentTrackId && playersReady && !isBlending && duration > 0);
 
   const handleSeekInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (listenMode === "live") return;
     const next = parseFloat(e.target.value);
     isSeekingRef.current = true;
     setIsSeeking(true);
@@ -1678,6 +1704,11 @@ export default function LeafLockPlayer({
   };
 
   const commitSeek = (value: number) => {
+    if (listenMode === "live") {
+      isSeekingRef.current = false;
+      setIsSeeking(false);
+      return;
+    }
     const player = getActivePlayer();
     if (!player || !canSeek) {
       isSeekingRef.current = false;
@@ -1751,7 +1782,7 @@ export default function LeafLockPlayer({
 
   return (
     <>
-    <div className="fm-player-glow fm-glass relative mx-auto w-full max-w-2xl p-5 sm:p-8 md:p-10">
+    <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
       <div className="mb-5 flex flex-col gap-4 sm:mb-6">
         {hideLogo ? null : (
           <LeafLockLogo
@@ -1811,63 +1842,20 @@ export default function LeafLockPlayer({
           >
             <span className="inline-flex items-center justify-center gap-2">
               <MonitorPlay className="h-3.5 w-3.5" />
-              {showVideo ? "Video Mode" : "Audio Only"}
+              Video {showVideo ? "On" : "Off (suggested)"}
             </span>
           </button>
         </div>
-        <p className="text-xs text-zinc-500">
-          {showVideo
-            ? "Video mode uses more data and may show the YouTube player."
-            : "Audio Only — recommended. Video mode uses more data."}
-        </p>
         </div>
       </div>
 
-      {isLoadingPlaylist ? (
-        <div className="mb-6 flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-black/40 px-4 py-4">
-          <Loader2 className="h-5 w-5 shrink-0 animate-spin text-emerald-400" />
-          <div>
-            <p className="text-sm font-medium text-white">Loading LeafLock FM playlist…</p>
-            <FmEqualizer active />
-          </div>
-        </div>
-      ) : null}
-
-      {playlistLoadFailed ? (
-        <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-4">
-          <p className="text-sm text-amber-200">Couldn&apos;t load the playlist. Tap retry</p>
-          <button
-            type="button"
-            onClick={() => setBootstrapKey((k) => k + 1)}
-            className="mt-3 rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-black"
-          >
-            Retry
-          </button>
-        </div>
-      ) : null}
-
       <div className="mb-5 min-h-[56px] sm:mb-6 sm:min-h-[60px]">
-        <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-zinc-500 sm:text-xs sm:tracking-[2px]">
+        <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500 sm:text-xs sm:tracking-[2px]">
           NOW PLAYING
-          {isPlaying && isConnected ? <FmEqualizer active /> : null}
         </div>
-        <div className="flex gap-4">
-          {currentTrackId ? (
-            <img
-              src={`https://i.ytimg.com/vi/${currentTrackId}/hqdefault.jpg`}
-              alt=""
-              className="h-16 w-16 shrink-0 rounded-lg border border-white/10 object-cover sm:h-20 sm:w-20"
-            />
-          ) : null}
-          <div className="min-w-0 flex-1">
-            <div className="text-lg font-medium leading-snug text-white sm:text-2xl md:text-3xl">
-              <span className="line-clamp-2">{nowPlaying.title}</span>
-              <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">
-                {nowPlaying.artist}
-              </span>
-            </div>
-            <p className="mt-1 text-xs text-zinc-500">Source: YouTube</p>
-          </div>
+        <div className="text-lg font-medium leading-snug text-white sm:text-2xl md:text-3xl">
+          <span className="line-clamp-2">{nowPlaying.title}</span>
+          <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">{nowPlaying.artist}</span>
         </div>
         {requestCredit ? (
           <p className="mt-2 text-sm font-medium text-emerald-400">
@@ -1921,28 +1909,49 @@ export default function LeafLockPlayer({
       </div>
 
       <div className="mb-6">
-        <input
-          type="range"
-          min={0}
-          max={duration > 0 ? duration : 1}
-          step={0.1}
-          value={Math.min(displayedTime, duration > 0 ? duration : 0)}
-          onChange={handleSeekInput}
-          onMouseUp={(e) => commitSeek(parseFloat(e.currentTarget.value))}
-          onTouchEnd={(e) => commitSeek(parseFloat(e.currentTarget.value))}
-          onKeyUp={(e) => {
-            if (e.currentTarget instanceof HTMLInputElement) {
-              commitSeek(parseFloat(e.currentTarget.value));
-            }
-          }}
-          disabled={!canSeek}
-          className="w-full accent-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="Seek track position"
-          aria-valuemin={0}
-          aria-valuemax={duration}
-          aria-valuenow={displayedTime}
-          aria-valuetext={`${formatPlaybackTime(displayedTime)} of ${formatPlaybackTime(duration)}`}
-        />
+        {listenMode === "live" ? (
+          <div
+            className="w-full"
+            role="progressbar"
+            aria-label="Live broadcast progress"
+            aria-valuemin={0}
+            aria-valuemax={duration}
+            aria-valuenow={displayedTime}
+            aria-valuetext={`${formatPlaybackTime(displayedTime)} of ${formatPlaybackTime(duration)}`}
+          >
+            <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                style={{
+                  width: `${duration > 0 ? Math.min(100, (displayedTime / duration) * 100) : 0}%`
+                }}
+              />
+            </div>
+          </div>
+        ) : (
+          <input
+            type="range"
+            min={0}
+            max={duration > 0 ? duration : 1}
+            step={0.1}
+            value={Math.min(displayedTime, duration > 0 ? duration : 0)}
+            onChange={handleSeekInput}
+            onMouseUp={(e) => commitSeek(parseFloat(e.currentTarget.value))}
+            onTouchEnd={(e) => commitSeek(parseFloat(e.currentTarget.value))}
+            onKeyUp={(e) => {
+              if (e.currentTarget instanceof HTMLInputElement) {
+                commitSeek(parseFloat(e.currentTarget.value));
+              }
+            }}
+            disabled={!canSeek}
+            className="w-full accent-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Seek track position"
+            aria-valuemin={0}
+            aria-valuemax={duration}
+            aria-valuenow={displayedTime}
+            aria-valuetext={`${formatPlaybackTime(displayedTime)} of ${formatPlaybackTime(duration)}`}
+          />
+        )}
         <div className="mt-1.5 flex justify-between text-xs tabular-nums text-zinc-500">
           <span>{formatPlaybackTime(displayedTime)}</span>
           <span>{formatPlaybackTime(duration)}</span>
@@ -2022,7 +2031,7 @@ export default function LeafLockPlayer({
               ? "DJ blend — starts in the last 15 seconds with a 5 second crossfade"
               : "Shuffling your playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
-            "Loading LeafLock FM playlist…"
+            "Loading YouTube playlist..."
           ) : (
             "Tap play to start shuffled playlist"
           )}
@@ -2032,11 +2041,43 @@ export default function LeafLockPlayer({
               browse.
             </span>
           ) : null}
-          {playlistCount > 0 && playlistId ? (
-            <span className="mt-1 block text-xs text-zinc-600">
-              {playlistCount} tracks in rotation
-            </span>
+          <span className="mt-1 block text-xs text-zinc-600">
+            {playlistCount > 0 && playlistId ? (
+              <>
+                <span className="sm:hidden">{playlistCount} tracks loaded</span>
+                <span className="hidden truncate sm:block">
+                  {playlistCount} tracks • https://www.youtube.com/playlist?list={playlistId}
+                </span>
+              </>
+            ) : (
+              "Loading playlist..."
+            )}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-emerald-400">
+          <a href="/fm" className="hover:underline">
+            Live FM
+          </a>
+          <span className="text-zinc-700">•</span>
+          {playlistId ? (
+            <a
+              href={`https://www.youtube.com/playlist?list=${playlistId}`}
+              target="_blank"
+              rel="noreferrer"
+              className="hover:underline"
+            >
+              YouTube
+            </a>
           ) : null}
+          <span className="text-zinc-700">•</span>
+          <a href="https://youtube.com/@leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
+            YouTube
+          </a>
+          <span className="text-zinc-700">•</span>
+          <a href="https://instagram.com/leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
+            Instagram
+          </a>
         </div>
       </div>
 
