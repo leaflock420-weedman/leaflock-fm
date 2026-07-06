@@ -42,21 +42,21 @@ export async function GET() {
     checks.currentTrack = false;
   }
 
-  const ready =
+  const fmReady =
     checks.server &&
-    checks.database &&
     checks.stationState &&
     checks.dj420Heartbeat &&
     checks.currentTrack;
 
   return Response.json(
     {
-      ok: ready,
+      ok: fmReady,
       checks,
+      databaseConnected: checks.database,
       hostName: "DJ420",
       hostStatus: resolveDj420Status(dj420),
       serverTime: new Date().toISOString()
     },
-    { status: ready ? 200 : 503 }
+    { status: fmReady ? 200 : 503 }
   );
 }
