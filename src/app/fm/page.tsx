@@ -1,3 +1,4 @@
+import Script from "next/script";
 import FmListenMode from "@/components/FmListenMode";
 import FmScheduleSection from "@/components/FmScheduleSection";
 import InstallPrompt from "@/components/InstallPrompt";
@@ -20,6 +21,8 @@ export default function FMPage() {
       </div>
       <InstallPrompt />
       <FmDeskPanel />
+      <Script src="/js/leaflock-player-adapter.js" strategy="afterInteractive" />
+      <Script src="/js/leaflock-media-session.js" strategy="afterInteractive" />
     </main>
   );
 }
