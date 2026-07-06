@@ -98,6 +98,27 @@ declare global {
 
 const BLEND_ENABLED_KEY = "leaflock-dj-blend-enabled";
 const SHOW_VIDEO_KEY = "leaflock-show-video";
+const LIVE_PLAYING_KEY = "leaflock-live-was-playing";
+
+function persistLivePlaying(playing: boolean) {
+  try {
+    if (playing) {
+      window.sessionStorage.setItem(LIVE_PLAYING_KEY, "1");
+    } else {
+      window.sessionStorage.removeItem(LIVE_PLAYING_KEY);
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function readLiveWasPlaying() {
+  try {
+    return window.sessionStorage.getItem(LIVE_PLAYING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function loadYouTubeApi(): Promise<YTNamespace> {
   return new Promise((resolve, reject) => {
@@ -1011,8 +1032,9 @@ export default function LeafLockPlayer({
       const videoChanged = currentVideoIdRef.current !== track.videoId;
       const revisionChanged = station.revision !== stationRevisionRef.current;
       const shouldReload =
-        Boolean(options?.forceReload && videoChanged) ||
-        (revisionChanged && videoChanged) ||
+        Boolean(options?.forceReload) ||
+        revisionChanged ||
+        videoChanged ||
         deckVideoIdRef.current[deck] !== track.videoId;
 
       setRequestCredit(station.requestCredit);
@@ -1160,7 +1182,7 @@ export default function LeafLockPlayer({
 
         if (revisionChanged || videoChanged) {
           applyLiveStationTrack(station, {
-            forceReload: videoChanged,
+            forceReload: true,
             resumePlayback: userPlaybackIntentRef.current === "playing"
           });
           return;
@@ -1184,7 +1206,7 @@ export default function LeafLockPlayer({
         }
 
         const drift = Math.abs(localTime - station.offsetSeconds);
-        if (drift > 30) {
+        if (drift > 6) {
           try {
             player.seekTo(station.offsetSeconds, true);
           } catch {
@@ -1199,24 +1221,10 @@ export default function LeafLockPlayer({
     void syncStation();
     const intervalId = window.setInterval(() => {
       void syncStation();
-    }, 8000);
+    }, 3000);
 
     return () => window.clearInterval(intervalId);
   }, [applyLiveStationTrack, getActivePlayer, listenMode, playlistReady, playersReady]);
-
-  useEffect(() => {
-    if (listenMode !== "live" || !playlistReady || !playersReady || liveStationJoinedRef.current) {
-      return;
-    }
-
-    void fetchLiveStation()
-      .then((station) => {
-        applyLiveStationTrackRef.current(station, { initialCue: true });
-      })
-      .catch(() => {
-        // Station poll will recover.
-      });
-  }, [listenMode, playlistReady, playersReady]);
 
   useEffect(() => {
     if (listenMode !== "solo" || !playlistReady) return;
@@ -1442,7 +1450,7 @@ export default function LeafLockPlayer({
                 if (deck === activeDeckRef.current && !blendInProgressRef.current) {
                   if (listenModeRef.current === "live") {
                     const now = Date.now();
-                    if (now - stationEndedAtRef.current < 12_000) {
+                    if (now - stationEndedAtRef.current < 2_000) {
                       return;
                     }
                     stationEndedAtRef.current = now;
@@ -1522,24 +1530,41 @@ export default function LeafLockPlayer({
           rotationQueueRef.current = createShuffledRotation(playlistRef.current);
         }
 
-        const first = rotationQueueRef.current[0] ?? null;
-        const second = rotationQueueRef.current[1] ?? null;
-        rotationIndexRef.current = 0;
+        if (listenModeRef.current === "live") {
+          const resumeAfterRefresh = readLiveWasPlaying();
+          if (resumeAfterRefresh) {
+            userPlaybackIntentRef.current = "playing";
+          }
+          void fetchLiveStation()
+            .then((station) => {
+              applyLiveStationTrackRef.current(station, {
+                initialCue: !resumeAfterRefresh,
+                resumePlayback: resumeAfterRefresh
+              });
+            })
+            .catch(() => {
+              // Station poll will recover.
+            });
+        } else {
+          const first = rotationQueueRef.current[0] ?? null;
+          const second = rotationQueueRef.current[1] ?? null;
+          rotationIndexRef.current = 0;
 
-        if (first) {
-          sessionQueueRef.current = [first];
-          sessionIndexRef.current = 0;
-          syncPreviousState();
-          setTrackUi(first, "LeafLock FM • tap play");
-          playerA.cueVideoById(first.id);
-          deckVideoIdRef.current.a = first.id;
-        }
+          if (first) {
+            sessionQueueRef.current = [first];
+            sessionIndexRef.current = 0;
+            syncPreviousState();
+            setTrackUi(first, "LeafLock FM • tap play");
+            playerA.cueVideoById(first.id);
+            deckVideoIdRef.current.a = first.id;
+          }
 
-        if (second) {
-          playerB.cueVideoById(second.id);
-          deckVideoIdRef.current.b = second.id;
-          prefetchedNextRef.current = second;
-          setUpNext(second.title);
+          if (second) {
+            playerB.cueVideoById(second.id);
+            deckVideoIdRef.current.b = second.id;
+            prefetchedNextRef.current = second;
+            setUpNext(second.title);
+          }
         }
       } catch (error) {
         playerInitRef.current = false;
@@ -1584,6 +1609,9 @@ export default function LeafLockPlayer({
 
     if (isPlaying) {
       userPlaybackIntentRef.current = "paused";
+      if (listenModeRef.current === "live") {
+        persistLivePlaying(false);
+      }
       cancelActiveCrossfade();
       playersRef.current.a?.pauseVideo();
       playersRef.current.b?.pauseVideo();
@@ -1597,6 +1625,9 @@ export default function LeafLockPlayer({
     }
 
     userPlaybackIntentRef.current = "playing";
+    if (listenModeRef.current === "live") {
+      persistLivePlaying(true);
+    }
     setPlaybackError(null);
     void syncMediaBridge(true);
     bindMediaSession();
@@ -1642,11 +1673,17 @@ export default function LeafLockPlayer({
     try {
       navigator.mediaSession.setActionHandler("play", () => {
         userPlaybackIntentRef.current = "playing";
+        if (listenModeRef.current === "live") {
+          persistLivePlaying(true);
+        }
         void syncMediaBridge(true);
         togglePlayRef.current();
       });
       navigator.mediaSession.setActionHandler("pause", () => {
         userPlaybackIntentRef.current = "paused";
+        if (listenModeRef.current === "live") {
+          persistLivePlaying(false);
+        }
         getActivePlayer()?.pauseVideo();
         isPlayingRef.current = false;
         setIsPlaying(false);
@@ -1656,6 +1693,7 @@ export default function LeafLockPlayer({
       });
       navigator.mediaSession.setActionHandler("stop", () => {
         userPlaybackIntentRef.current = "stopped";
+        persistLivePlaying(false);
         playersRef.current.a?.pauseVideo();
         playersRef.current.b?.pauseVideo();
         isPlayingRef.current = false;
@@ -1823,7 +1861,9 @@ export default function LeafLockPlayer({
   };
 
   const showMiniDock =
-    controlsOffscreen && (isPlaying || isConnected) && !isLoadingPlaylist;
+    !isLoadingPlaylist &&
+    (isPlaying || isConnected) &&
+    (listenMode === "live" && isMobile ? true : controlsOffscreen);
 
   const miniDock =
     portalReady && showMiniDock
@@ -2142,6 +2182,26 @@ export default function LeafLockPlayer({
             <span className="mt-2 block text-xs text-zinc-500">
               Background listening: use the bottom bar or lock-screen play/pause while you browse.
             </span>
+          ) : null}
+          {(isPlaying || isConnected) && !isLoadingPlaylist ? (
+            <details className="mt-3 rounded-xl border border-zinc-800 bg-black/30 px-3 py-2 text-left">
+              <summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.16em] text-emerald-400">
+                Background listening
+              </summary>
+              <p className="mt-2 text-xs text-zinc-500">
+                Minimize the browser or switch apps — playback continues where your device allows.
+                Use the bottom mini player or lock-screen controls for play/pause. Close the tab to
+                stop completely.
+              </p>
+              <button
+                type="button"
+                onClick={togglePlay}
+                className="mt-3 inline-flex items-center gap-2 rounded-full border border-emerald-500/40 px-4 py-2 text-xs font-semibold text-emerald-300"
+              >
+                {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                {isPlaying ? "Pause" : "Play"}
+              </button>
+            </details>
           ) : null}
         </div>
       </div>
