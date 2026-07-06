@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { getStationControl } from "@/lib/fm-admin-data";
 import {
   acknowledgePlayerInject,
   getFmPublicConfig,
@@ -32,6 +33,8 @@ export type StationState = {
   rotation: PlaylistVideo[];
   rotationIndex: number;
   requestFlow: { anchorVideoId: string; vibeRemaining: number } | null;
+  /** Tracks played since last request slot (target: 3 playlist, 1 request, repeat). */
+  playlistTracksSinceRequest: number;
   current: StationTrack;
   trackStartedAt: string;
   isPlaying: boolean;
@@ -119,9 +122,17 @@ async function saveStationState(state: StationState) {
   await fs.writeFile(STATION_PATH, JSON.stringify(state, null, 2), "utf8");
 }
 
-async function bootstrapStation(): Promise<StationState> {
+async function resolveActivePlaylistId(): Promise<string> {
+  const control = await getStationControl();
+  if (control.mode === "maintenance" || control.mode === "live_stream") {
+    return control.defaultPlaylistId;
+  }
   const config = await getFmPublicConfig();
-  const playlistId = config.simplePlaylistId || config.playlistId;
+  return control.activePlaylistId || config.playlistId || config.simplePlaylistId;
+}
+
+async function bootstrapStation(): Promise<StationState> {
+  const playlistId = await resolveActivePlaylistId();
   const videos = await fetchPlaylistVideosFromYouTubeApi(playlistId);
   const rotation = createShuffledRotation(videos);
   const first = rotation[0] ?? videos[0];
@@ -136,6 +147,7 @@ async function bootstrapStation(): Promise<StationState> {
     rotation,
     rotationIndex: 0,
     requestFlow: null,
+    playlistTracksSinceRequest: 0,
     current: toStationTrack(first),
     trackStartedAt: new Date().toISOString(),
     isPlaying: true
@@ -150,12 +162,19 @@ function peekNextInRotation(state: StationState): PlaylistVideo | null {
   return state.rotation[nextIndex] ?? null;
 }
 
+const PLAYLIST_TRACKS_BEFORE_REQUEST = 3;
+
 async function resolveNextStationTrack(state: StationState): Promise<{
   track: StationTrack;
   rotationIndex: number;
   requestFlow: StationState["requestFlow"];
+  playlistTracksSinceRequest: number;
 }> {
-  const inject = await peekPlayerInject();
+  const control = await getStationControl();
+  const requestDue =
+    control.allowRequests && state.playlistTracksSinceRequest >= PLAYLIST_TRACKS_BEFORE_REQUEST;
+
+  const inject = requestDue ? await peekPlayerInject() : null;
   if (inject) {
     await acknowledgePlayerInject(inject);
     const track = toStationTrack(
@@ -169,7 +188,8 @@ async function resolveNextStationTrack(state: StationState): Promise<{
       requestFlow:
         inject.source === "jukebox"
           ? { anchorVideoId: inject.videoId, vibeRemaining: 1 }
-          : null
+          : null,
+      playlistTracksSinceRequest: 0
     };
   }
 
@@ -182,7 +202,8 @@ async function resolveNextStationTrack(state: StationState): Promise<{
       return {
         track: toStationTrack(vibe, "vibe"),
         rotationIndex: state.rotationIndex,
-        requestFlow: null
+        requestFlow: null,
+        playlistTracksSinceRequest: state.playlistTracksSinceRequest
       };
     }
   }
@@ -197,14 +218,16 @@ async function resolveNextStationTrack(state: StationState): Promise<{
     return {
       track: state.current,
       rotationIndex: state.rotationIndex,
-      requestFlow: null
+      requestFlow: null,
+      playlistTracksSinceRequest: state.playlistTracksSinceRequest
     };
   }
 
   return {
     track: toStationTrack(next),
     rotationIndex: nextIndex,
-    requestFlow: null
+    requestFlow: null,
+    playlistTracksSinceRequest: state.playlistTracksSinceRequest + 1
   };
 }
 
@@ -223,6 +246,7 @@ async function advanceStation(state: StationState): Promise<StationState> {
     revision: state.revision + 1,
     rotationIndex: next.rotationIndex,
     requestFlow: next.requestFlow,
+    playlistTracksSinceRequest: next.playlistTracksSinceRequest,
     current: next.track,
     trackStartedAt: new Date().toISOString(),
     isPlaying: true
@@ -232,17 +256,36 @@ async function advanceStation(state: StationState): Promise<StationState> {
 export async function getPublicStation(): Promise<PublicStation> {
   return withStationMutex(async () => {
     let state = await loadStationState();
-    const config = await getFmPublicConfig();
-    const activePlaylistId = config.simplePlaylistId || config.playlistId;
+    const activePlaylistId = await resolveActivePlaylistId();
 
     if (!state) {
       state = await bootstrapStation();
       await saveStationState(state);
     }
 
+    if (typeof state.playlistTracksSinceRequest !== "number") {
+      state.playlistTracksSinceRequest = 0;
+    }
+
     if (state.playlistId !== activePlaylistId) {
       state = await bootstrapStation();
       await saveStationState(state);
+    }
+
+    const control = await getStationControl();
+    if (control.mode === "maintenance") {
+      const listeners = await getLiveListeners();
+      return {
+        revision: state.revision,
+        playlistId: state.playlistId,
+        current: state.current,
+        offsetSeconds: 0,
+        upNext: null,
+        requestCredit: null,
+        isPlaying: false,
+        listenerCount: listeners.length,
+        listeners
+      };
     }
 
     let guard = 0;

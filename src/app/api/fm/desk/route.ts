@@ -117,7 +117,9 @@ export async function POST(request: Request) {
   }
 
   if (body.action === "jukebox-status" && body.jukeboxId && body.jukeboxStatus) {
-    const item = await updateJukeboxSuggestion(body.jukeboxId, body.jukeboxStatus);
+    const item = await updateJukeboxSuggestion(body.jukeboxId, {
+      status: body.jukeboxStatus
+    });
     if (!item) {
       return Response.json({ error: "Jukebox item not found" }, { status: 404 });
     }

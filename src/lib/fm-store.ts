@@ -78,8 +78,9 @@ export type JukeboxSuggestion = {
   title: string;
   suggestedBy?: string;
   instagram?: string;
+  boosts?: number;
   createdAt: string;
-  status: "pending" | "played" | "skipped";
+  status: "pending" | "played" | "skipped" | "approved" | "rejected" | "pinned" | "banned";
   playedAt?: string;
 };
 
@@ -373,7 +374,7 @@ export async function getJukeboxSuggestions(status?: JukeboxSuggestion["status"]
 
 export async function updateJukeboxSuggestion(
   id: string,
-  status: JukeboxSuggestion["status"]
+  patch: Partial<Pick<JukeboxSuggestion, "status" | "boosts" | "playedAt">>
 ): Promise<JukeboxSuggestion | null> {
   const suggestions = await readJsonFile<JukeboxSuggestion[]>(JUKEBOX_PATH, []);
   const index = suggestions.findIndex((item) => item.id === id);
@@ -381,8 +382,23 @@ export async function updateJukeboxSuggestion(
 
   suggestions[index] = {
     ...suggestions[index],
-    status,
-    playedAt: status === "played" ? new Date().toISOString() : suggestions[index].playedAt
+    ...patch,
+    playedAt:
+      patch.status === "played"
+        ? new Date().toISOString()
+        : patch.playedAt ?? suggestions[index].playedAt
+  };
+  await writeJsonFile(JUKEBOX_PATH, suggestions);
+  return suggestions[index];
+}
+
+export async function boostJukeboxSuggestion(id: string): Promise<JukeboxSuggestion | null> {
+  const suggestions = await readJsonFile<JukeboxSuggestion[]>(JUKEBOX_PATH, []);
+  const index = suggestions.findIndex((item) => item.id === id);
+  if (index < 0) return null;
+  suggestions[index] = {
+    ...suggestions[index],
+    boosts: (suggestions[index].boosts ?? 0) + 1
   };
   await writeJsonFile(JUKEBOX_PATH, suggestions);
   return suggestions[index];
@@ -505,7 +521,7 @@ export async function acknowledgePlayerInject(inject: PlayerInject) {
     return;
   }
 
-  await updateJukeboxSuggestion(inject.id, "played");
+  await updateJukeboxSuggestion(inject.id, { status: "played" });
   await saveFmDeskSettings({
     runtime: { lastAutoJukeboxAt: new Date().toISOString() }
   });
@@ -540,7 +556,9 @@ export async function getActivityLog(limit = 100): Promise<ActivityLogEntry[]> {
 }
 
 export function verifyFmDeskAccess(request: Request) {
-  const secret = process.env.FM_ADMIN_SECRET;
+  const secret =
+    process.env.FM_ADMIN_PASSWORD?.trim() ||
+    process.env.FM_ADMIN_SECRET?.trim();
   if (!secret) return false;
 
   const auth = request.headers.get("authorization");

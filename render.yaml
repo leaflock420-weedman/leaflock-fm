@@ -2,10 +2,12 @@ services:
   - type: web
     name: leaflock-fm
     runtime: node
-    plan: free
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-    healthCheckPath: /
+    # Paid Starter — always-on (no free-tier cold starts)
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:standalone
+    healthCheckPath: /fm
+    numInstances: 1
     domains:
       - fm.leaflock.com.au
     envVars:

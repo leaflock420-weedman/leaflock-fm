@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import LoveButton from "@/components/LoveButton";
 import LeafLockLogo from "@/components/LeafLockLogo";
+import FmEqualizer from "@/components/fm/FmEqualizer";
 import {
   BLEND_POLL_INTERVAL_MS,
   TOTAL_BLEND_MS,
@@ -242,8 +243,8 @@ export default function LeafLockPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(85);
   const [nowPlaying, setNowPlaying] = useState({
-    title: "LeafLock FM 104.2 — Shuffle",
-    artist: "Loading playlist..."
+    title: "LeafLock FM 104.2",
+    artist: "Locked In Radio"
   });
   const [upNext, setUpNext] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -269,6 +270,8 @@ export default function LeafLockPlayer({
   const [activeDeck, setActiveDeck] = useState<DeckId>("a");
   const [requestCredit, setRequestCredit] = useState<string | null>(null);
   const [liveRoomLabel, setLiveRoomLabel] = useState<string | null>(null);
+  const [playlistLoadFailed, setPlaylistLoadFailed] = useState(false);
+  const [bootstrapKey, setBootstrapKey] = useState(0);
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const videoShellRef = useRef<HTMLDivElement | null>(null);
@@ -1085,7 +1088,7 @@ export default function LeafLockPlayer({
 
     const syncStation = async () => {
       try {
-        const response = await fetch("/api/fm/station", { cache: "no-store" });
+        const response = await fetch("/api/station-state", { cache: "no-store" });
         const station = (await response.json()) as PublicStationPayload;
         if (!station.current?.videoId) return;
 
@@ -1169,21 +1172,32 @@ export default function LeafLockPlayer({
     let cancelled = false;
 
     async function bootstrap() {
+      setPlaylistLoadFailed(false);
+      setPlaybackError(null);
+      setIsLoadingPlaylist(true);
       try {
+        const stateResponse = await fetch("/api/station-state", { cache: "no-store" });
+        const stationState = (await stateResponse.json()) as {
+          playlistId?: string;
+          mode?: string;
+        };
+
         const configResponse = await fetch("/api/fm/config", { cache: "no-store" });
         const config = (await configResponse.json()) as {
           playlistId?: string;
           simplePlaylistId?: string;
           playlists?: Partial<Record<FmPlayerMode, string>>;
         };
-        const activePlaylistId = pickPlaylistId(
-          {
-            playlistId: config.playlistId ?? "",
-            simplePlaylistId: config.simplePlaylistId ?? config.playlistId ?? "",
-            playlists: config.playlists ?? {}
-          },
-          mode
-        );
+        const activePlaylistId =
+          stationState.playlistId ||
+          pickPlaylistId(
+            {
+              playlistId: config.playlistId ?? "",
+              simplePlaylistId: config.simplePlaylistId ?? config.playlistId ?? "",
+              playlists: config.playlists ?? {}
+            },
+            mode
+          );
 
         if (!activePlaylistId) {
           throw new Error("Playlist is not configured");
@@ -1221,9 +1235,8 @@ export default function LeafLockPlayer({
         });
       } catch (error) {
         if (!cancelled) {
-          setPlaybackError(
-            error instanceof Error ? error.message : "Could not load YouTube playlist"
-          );
+          setPlaylistLoadFailed(true);
+          setPlaybackError("Couldn't load the playlist. Tap retry.");
         }
       } finally {
         if (!cancelled) setIsLoadingPlaylist(false);
@@ -1234,7 +1247,7 @@ export default function LeafLockPlayer({
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, [mode, bootstrapKey]);
 
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
@@ -1339,7 +1352,7 @@ export default function LeafLockPlayer({
                     }
                     stationEndedAtRef.current = now;
 
-                    void fetch("/api/fm/station", { cache: "no-store" })
+                    void fetch("/api/station-state", { cache: "no-store" })
                       .then((response) => response.json())
                       .then((station: PublicStationPayload) => {
                         if (station.current?.videoId !== currentVideoIdRef.current) {
@@ -1479,7 +1492,7 @@ export default function LeafLockPlayer({
     bindMediaSession();
 
     if (listenModeRef.current === "live") {
-      void fetch("/api/fm/station", { cache: "no-store" })
+      void fetch("/api/station-state", { cache: "no-store" })
         .then((response) => response.json())
         .then((station: PublicStationPayload) => {
           applyLiveStationTrackRef.current(station, { forceReload: true });
@@ -1738,7 +1751,7 @@ export default function LeafLockPlayer({
 
   return (
     <>
-    <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8 md:p-10">
+    <div className="fm-player-glow fm-glass relative mx-auto w-full max-w-2xl p-5 sm:p-8 md:p-10">
       <div className="mb-5 flex flex-col gap-4 sm:mb-6">
         {hideLogo ? null : (
           <LeafLockLogo
@@ -1798,20 +1811,63 @@ export default function LeafLockPlayer({
           >
             <span className="inline-flex items-center justify-center gap-2">
               <MonitorPlay className="h-3.5 w-3.5" />
-              Video {showVideo ? "On" : "Off (suggested)"}
+              {showVideo ? "Video Mode" : "Audio Only"}
             </span>
           </button>
         </div>
+        <p className="text-xs text-zinc-500">
+          {showVideo
+            ? "Video mode uses more data and may show the YouTube player."
+            : "Audio Only — recommended. Video mode uses more data."}
+        </p>
         </div>
       </div>
 
-      <div className="mb-5 min-h-[56px] sm:mb-6 sm:min-h-[60px]">
-        <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500 sm:text-xs sm:tracking-[2px]">
-          NOW PLAYING
+      {isLoadingPlaylist ? (
+        <div className="mb-6 flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-black/40 px-4 py-4">
+          <Loader2 className="h-5 w-5 shrink-0 animate-spin text-emerald-400" />
+          <div>
+            <p className="text-sm font-medium text-white">Loading LeafLock FM playlist…</p>
+            <FmEqualizer active />
+          </div>
         </div>
-        <div className="text-lg font-medium leading-snug text-white sm:text-2xl md:text-3xl">
-          <span className="line-clamp-2">{nowPlaying.title}</span>
-          <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">{nowPlaying.artist}</span>
+      ) : null}
+
+      {playlistLoadFailed ? (
+        <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-4">
+          <p className="text-sm text-amber-200">Couldn&apos;t load the playlist. Tap retry</p>
+          <button
+            type="button"
+            onClick={() => setBootstrapKey((k) => k + 1)}
+            className="mt-3 rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-black"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
+
+      <div className="mb-5 min-h-[56px] sm:mb-6 sm:min-h-[60px]">
+        <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-zinc-500 sm:text-xs sm:tracking-[2px]">
+          NOW PLAYING
+          {isPlaying && isConnected ? <FmEqualizer active /> : null}
+        </div>
+        <div className="flex gap-4">
+          {currentTrackId ? (
+            <img
+              src={`https://i.ytimg.com/vi/${currentTrackId}/hqdefault.jpg`}
+              alt=""
+              className="h-16 w-16 shrink-0 rounded-lg border border-white/10 object-cover sm:h-20 sm:w-20"
+            />
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <div className="text-lg font-medium leading-snug text-white sm:text-2xl md:text-3xl">
+              <span className="line-clamp-2">{nowPlaying.title}</span>
+              <span className="mt-1 block line-clamp-1 text-base text-zinc-400 sm:text-xl">
+                {nowPlaying.artist}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-zinc-500">Source: YouTube</p>
+          </div>
         </div>
         {requestCredit ? (
           <p className="mt-2 text-sm font-medium text-emerald-400">
@@ -1966,7 +2022,7 @@ export default function LeafLockPlayer({
               ? "DJ blend — starts in the last 15 seconds with a 5 second crossfade"
               : "Shuffling your playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
-            "Loading YouTube playlist..."
+            "Loading LeafLock FM playlist…"
           ) : (
             "Tap play to start shuffled playlist"
           )}
@@ -1976,43 +2032,11 @@ export default function LeafLockPlayer({
               browse.
             </span>
           ) : null}
-          <span className="mt-1 block text-xs text-zinc-600">
-            {playlistCount > 0 && playlistId ? (
-              <>
-                <span className="sm:hidden">{playlistCount} tracks loaded</span>
-                <span className="hidden truncate sm:block">
-                  {playlistCount} tracks • https://www.youtube.com/playlist?list={playlistId}
-                </span>
-              </>
-            ) : (
-              "Loading playlist..."
-            )}
-          </span>
-        </div>
-
-        <div className="flex flex-wrap gap-x-4 gap-y-2 text-emerald-400">
-          <a href="/fm" className="hover:underline">
-            Live FM
-          </a>
-          <span className="text-zinc-700">•</span>
-          {playlistId ? (
-            <a
-              href={`https://www.youtube.com/playlist?list=${playlistId}`}
-              target="_blank"
-              rel="noreferrer"
-              className="hover:underline"
-            >
-              YouTube
-            </a>
+          {playlistCount > 0 && playlistId ? (
+            <span className="mt-1 block text-xs text-zinc-600">
+              {playlistCount} tracks in rotation
+            </span>
           ) : null}
-          <span className="text-zinc-700">•</span>
-          <a href="https://youtube.com/@leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
-            YouTube
-          </a>
-          <span className="text-zinc-700">•</span>
-          <a href="https://instagram.com/leaflockofficial" target="_blank" rel="noreferrer" className="hover:underline">
-            Instagram
-          </a>
         </div>
       </div>
 

@@ -16,7 +16,7 @@ type YouTubeVideosResponse = {
   items?: {
     id?: string;
     contentDetails?: { duration?: string };
-    snippet?: { channelTitle?: string };
+    snippet?: { title?: string; channelTitle?: string };
   }[];
   error?: { message?: string };
 };
@@ -108,6 +108,45 @@ async function getOAuthAccessToken(): Promise<string | null> {
 
   const data = (await response.json()) as { access_token?: string };
   return data.access_token ?? null;
+}
+
+export async function fetchVideoDetails(
+  videoId: string
+): Promise<{ title: string; durationSec: number; channelTitle?: string }> {
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  const accessToken = await getOAuthAccessToken();
+
+  if (!apiKey && !accessToken) {
+    throw new Error("YOUTUBE_API_KEY is required to validate video requests");
+  }
+
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("part", "contentDetails,snippet");
+  url.searchParams.set("id", videoId);
+  if (!accessToken && apiKey) {
+    url.searchParams.set("key", apiKey);
+  }
+
+  const headers: HeadersInit = {};
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
+
+  const response = await fetch(url, { headers, cache: "no-store" });
+  const data = (await response.json()) as YouTubeVideosResponse;
+
+  if (!response.ok || !data.items?.[0]?.id) {
+    throw new Error(data.error?.message || "Video not found on YouTube");
+  }
+
+  const item = data.items[0];
+  return {
+    title: item.snippet?.title?.trim() || `YouTube track ${videoId}`,
+    durationSec: item.contentDetails?.duration
+      ? parseIso8601Duration(item.contentDetails.duration)
+      : 0,
+    channelTitle: item.snippet?.channelTitle
+  };
 }
 
 export async function fetchPlaylistVideosFromYouTubeApi(
