@@ -61,7 +61,6 @@ export default function FmListenMode() {
   function selectMode(next: ListenMode) {
     setMode(next);
     try {
-      window.LeafLockPlayer?.setMode?.(next === "live" ? "live" : "private");
       window.localStorage.setItem(MODE_KEY, next);
       void fetch("/api/fm/presence", {
         method: "POST",
