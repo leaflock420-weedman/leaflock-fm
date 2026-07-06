@@ -1,10 +1,16 @@
-import { getPublicStation, resetLiveStation } from "@/lib/fm-station";
+import { getNowPlaying, resetLiveStation } from "@/lib/fm-station";
 import { verifyFmDeskAccess } from "@/lib/fm-store";
+
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const station = await getPublicStation();
-    return Response.json(station);
+    const station = await getNowPlaying();
+    return Response.json(station, {
+      headers: {
+        "Cache-Control": "no-store"
+      }
+    });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Station unavailable" },
