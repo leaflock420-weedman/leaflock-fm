@@ -1,25 +1,23 @@
 /**
- * Permanent Live Radio audio element.
+ * Permanent Live Radio <audio> element.
  *
- * Live Radio sound MUST come from this element only — not YouTube, not Web Audio.
- * DJ420 / station stream is mixed server-side; the client never changes src per song.
- *
- * Rules:
- * - One element: #leaflockMobileAudio
- * - Live src is always /api/fm/listen (set once)
- * - Never destroy / recreate / clear src between songs
- * - Never pause on visibilitychange / pagehide / blur / freeze
- * - Only pause on explicit user pause/stop
+ * Keeps playing after the user leaves Chrome (YouTube iframes cannot).
+ * Source is always /api/fm/listen — set once, never swapped per song.
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
-
-/** Fixed Live Radio mount — do not change between tracks. */
 export const LIVE_RADIO_STREAM_PATH = "/api/fm/listen";
+
+export type LiveAudioMode = "stream" | "hold-loop" | "unknown";
 
 function liveStreamUrl(): string {
   if (typeof window === "undefined") return LIVE_RADIO_STREAM_PATH;
   return `${window.location.origin}${LIVE_RADIO_STREAM_PATH}`;
+}
+
+function holdUrl(): string {
+  if (typeof window === "undefined") return "/bg-hold.wav";
+  return `${window.location.origin}/bg-hold.wav`;
 }
 
 export function isPhoneUserAgent(): boolean {
@@ -47,16 +45,13 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   return audio;
 }
 
-/**
- * Bind the permanent Live Radio source once. Never reassign between songs.
- */
+/** Bind Live Radio mount once. Never change src between songs. */
 export function ensureLiveRadioSource(): HTMLAudioElement | null {
   const audio = getLeaflockMobileAudio();
   if (!audio) return null;
 
   if (audio.dataset.leaflockMode !== "live-radio") {
     audio.dataset.leaflockMode = "live-radio";
-    // loop helps when server falls back to a finite hold file; Icecast ignores it.
     audio.loop = true;
     audio.src = liveStreamUrl();
   }
@@ -64,18 +59,18 @@ export function ensureLiveRadioSource(): HTMLAudioElement | null {
 }
 
 /**
- * Start Live Radio inside the user gesture. Synchronous play() kick.
- * Does not use Web Audio (suspended in background on mobile).
+ * Start permanent Live Radio audio in the user-gesture stack.
+ * Always succeeds with /api/fm/listen (stream or hold-loop on server).
  */
 export function startLiveRadioAudio(volume01 = 0.85): void {
   try {
     const audio = ensureLiveRadioSource();
     if (!audio) return;
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.05, volume01));
+    audio.volume = Math.min(1, Math.max(0.15, volume01));
     void audio.play().catch(() => undefined);
   } catch {
-    // Best-effort — never throw into UI play path.
+    // never throw into UI
   }
 }
 
@@ -84,17 +79,14 @@ export async function resumeLiveRadioAudio(volume01 = 0.85): Promise<boolean> {
     const audio = ensureLiveRadioSource();
     if (!audio) return false;
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.05, volume01));
-    if (audio.paused) {
-      await audio.play();
-    }
+    audio.volume = Math.min(1, Math.max(0.15, volume01));
+    if (audio.paused) await audio.play();
     return !audio.paused;
   } catch {
     return false;
   }
 }
 
-/** User pause/stop only. */
 export function pauseLiveRadioAudio(): void {
   try {
     getLeaflockMobileAudio()?.pause();
@@ -115,25 +107,31 @@ export function isLiveRadioPlaying(): boolean {
   return Boolean(audio && !audio.paused);
 }
 
-// --- Private jukebox helpers (Media Session hold only; YouTube is audible) ---
-
-function holdUrl(): string {
-  if (typeof window === "undefined") return "/bg-hold.wav";
-  return `${window.location.origin}/bg-hold.wav`;
+/** Probe whether /api/fm/listen is a real station stream or hold-loop. */
+export async function probeLiveAudioMode(): Promise<LiveAudioMode> {
+  try {
+    const response = await fetch("/api/fm/listen-status", { cache: "no-store" });
+    if (!response.ok) return "unknown";
+    const payload = (await response.json()) as { source?: string };
+    if (payload.source === "stream") return "stream";
+    if (payload.source === "hold-loop" || payload.source === "hold") return "hold-loop";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
-/** Soft hold for private jukebox Media Session — not used for Live Radio songs. */
+// --- Private jukebox soft hold ---
+
 export function kickPrivateJukeboxHold(volume01 = 0.08): void {
   try {
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
-    // Do not steal live-radio source if already in live mode on this element.
-    if (audio.dataset.leaflockMode === "live-radio" && !audio.paused) {
-      return;
-    }
+    if (audio.dataset.leaflockMode === "live-radio" && !audio.paused) return;
+
     audio.dataset.leaflockMode = "jukebox-hold";
     audio.loop = true;
-    if (!audio.getAttribute("src") || audio.dataset.leaflockSrc !== "hold") {
+    if (audio.dataset.leaflockSrc !== "hold") {
       audio.dataset.leaflockSrc = "hold";
       audio.src = holdUrl();
     }
@@ -153,7 +151,6 @@ export function setMobileAudioVolume(volume01: number, muted: boolean): void {
   setLiveRadioVolume(volume01, muted);
 }
 
-/** @deprecated use startLiveRadioAudio / kickPrivateJukeboxHold */
 export function kickMobileBackgroundAudio(volume01 = 0.12): void {
   kickPrivateJukeboxHold(volume01);
 }
@@ -172,10 +169,5 @@ export function getMobileAudioSource(): "stream" | "hold" {
   return "hold";
 }
 
-export function ensureMobileAudioContext(): void {
-  // Intentionally empty — Web Audio is suspended in mobile background and caused silent "playing" sessions.
-}
-
-export function stopMobileAudioContext(): void {
-  // no-op
-}
+export function ensureMobileAudioContext(): void {}
+export function stopMobileAudioContext(): void {}
