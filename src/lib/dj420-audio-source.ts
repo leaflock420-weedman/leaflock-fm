@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import fs from "fs";
+import https from "https";
 import path from "path";
 import { getNowPlaying } from "@/lib/fm-station";
 
@@ -10,27 +12,107 @@ type CachedUrl = {
 
 const urlCache = new Map<string, CachedUrl>();
 const CACHE_MS = 2.5 * 60 * 60 * 1000;
+let ensureBinPromise: Promise<string | null> | null = null;
 
-function ytdlpBin(): string {
-  if (process.env.YT_DLP_PATH) return process.env.YT_DLP_PATH;
-  // Prefer local vendored binary from postinstall
-  const local = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
-  return local;
+function candidateBins(): string[] {
+  const name = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+  const cwd = process.cwd();
+  return [
+    process.env.YT_DLP_PATH,
+    path.join(cwd, "bin", name),
+    path.join(cwd, "..", "bin", name),
+    path.join(cwd, name),
+    name,
+    "yt-dlp"
+  ].filter((v): v is string => Boolean(v && String(v).trim()));
 }
 
-function runYtdlp(args: string[], timeoutMs = 45000): Promise<string> {
+function downloadYtDlp(dest: string): Promise<void> {
+  const url =
+    process.platform === "win32"
+      ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+      : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+
   return new Promise((resolve, reject) => {
-    const bin = ytdlpBin();
-    const child = spawn(bin, args, {
+    const get = (u: string, redirects = 0) => {
+      https
+        .get(u, (res) => {
+          if (
+            res.statusCode &&
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location &&
+            redirects < 5
+          ) {
+            res.resume();
+            get(res.headers.location, redirects + 1);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            reject(new Error(`download HTTP ${res.statusCode}`));
+            res.resume();
+            return;
+          }
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          const file = fs.createWriteStream(dest);
+          res.pipe(file);
+          file.on("finish", () => {
+            file.close(() => {
+              try {
+                if (process.platform !== "win32") fs.chmodSync(dest, 0o755);
+              } catch {
+                // ignore
+              }
+              resolve();
+            });
+          });
+        })
+        .on("error", reject);
+    };
+    get(url);
+  });
+}
+
+async function ensureYtDlpBinary(): Promise<string | null> {
+  if (ensureBinPromise) return ensureBinPromise;
+  ensureBinPromise = (async () => {
+    for (const bin of candidateBins()) {
+      try {
+        if (bin.includes("/") || bin.includes("\\")) {
+          if (fs.existsSync(bin) && fs.statSync(bin).size > 500_000) return bin;
+        }
+      } catch {
+        // continue
+      }
+    }
+
+    const dest = path.join(
+      process.cwd(),
+      "bin",
+      process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+    );
+    try {
+      await downloadYtDlp(dest);
+      if (fs.existsSync(dest)) return dest;
+    } catch (error) {
+      console.error("[dj420-audio] yt-dlp download failed", error);
+    }
+    return null;
+  })();
+  return ensureBinPromise;
+}
+
+function runProcess(command: string, args: string[], timeoutMs = 50000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
       windowsHide: true,
       env: { ...process.env, PYTHONUTF8: "1" }
     });
-
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("yt-dlp timeout"));
+      reject(new Error("timeout"));
     }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -45,53 +127,49 @@ function runYtdlp(args: string[], timeoutMs = 45000): Promise<string> {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0 && stdout.trim()) {
-        resolve(stdout.trim());
-        return;
-      }
-      // Fallback: try python -m yt_dlp
-      if (bin !== "yt-dlp" && !process.env.YT_DLP_PATH) {
-        // already failed primary
-      }
-      reject(new Error(stderr.slice(-500) || `yt-dlp exit ${code}`));
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(stderr.slice(-800) || `exit ${code}`));
     });
   });
 }
 
-async function runYtdlpWithPythonFallback(args: string[]): Promise<string> {
-  try {
-    return await runYtdlp(args);
-  } catch (primaryError) {
+async function resolveWithYtDlp(videoId: string): Promise<string> {
+  const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const args = [
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+    "-g",
+    "--no-playlist",
+    "--no-warnings",
+    pageUrl
+  ];
+
+  const bin = await ensureYtDlpBinary();
+  const attempts: Array<() => Promise<string>> = [];
+
+  if (bin) {
+    attempts.push(() => runProcess(bin, args));
+  }
+  attempts.push(() => runProcess("yt-dlp", args));
+  attempts.push(() =>
+    runProcess(process.platform === "win32" ? "python" : "python3", [
+      "-m",
+      "yt_dlp",
+      ...args
+    ])
+  );
+
+  let lastError: unknown;
+  for (const attempt of attempts) {
     try {
-      return await new Promise((resolve, reject) => {
-        const child = spawn(
-          process.platform === "win32" ? "python" : "python3",
-          ["-m", "yt_dlp", ...args],
-          { windowsHide: true, env: { ...process.env, PYTHONUTF8: "1" } }
-        );
-        let stdout = "";
-        let stderr = "";
-        const timer = setTimeout(() => {
-          child.kill("SIGKILL");
-          reject(new Error("python yt_dlp timeout"));
-        }, 45000);
-        child.stdout.on("data", (c: Buffer) => {
-          stdout += c.toString("utf8");
-        });
-        child.stderr.on("data", (c: Buffer) => {
-          stderr += c.toString("utf8");
-        });
-        child.on("error", reject);
-        child.on("close", (code) => {
-          clearTimeout(timer);
-          if (code === 0 && stdout.trim()) resolve(stdout.trim());
-          else reject(new Error(stderr.slice(-500) || `yt_dlp exit ${code}`));
-        });
-      });
-    } catch {
-      throw primaryError;
+      const out = await attempt();
+      const url = out.split(/\r?\n/).filter(Boolean).pop();
+      if (url?.startsWith("http")) return url;
+    } catch (error) {
+      lastError = error;
     }
   }
+  throw lastError || new Error("yt-dlp failed");
 }
 
 export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl | null> {
@@ -100,24 +178,14 @@ export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl
     return cached;
   }
 
-  const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
   try {
-    const out = await runYtdlpWithPythonFallback([
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-      "-g",
-      "--no-playlist",
-      "--no-warnings",
-      pageUrl
-    ]);
-    const url = out.split(/\r?\n/).filter(Boolean).pop();
-    if (!url || !url.startsWith("http")) return null;
-
-    const contentType = url.includes("mime=audio%2Fmp4") || url.includes("itag=140")
-      ? "audio/mp4"
-      : url.includes("webm")
-        ? "audio/webm"
-        : "audio/mp4";
+    const url = await resolveWithYtDlp(videoId);
+    const contentType =
+      url.includes("mime=audio%2Fmp4") || url.includes("itag=140")
+        ? "audio/mp4"
+        : url.includes("webm")
+          ? "audio/webm"
+          : "audio/mp4";
 
     const entry: CachedUrl = {
       url,
@@ -143,10 +211,6 @@ export type LiveTrackAudio = {
   revision: number;
 };
 
-/**
- * Resolve the current DJ420 track to a direct googlevideo audio URL,
- * starting from the station timeline offset.
- */
 export async function getCurrentLiveTrackAudio(): Promise<LiveTrackAudio | null> {
   const nowPlaying = await getNowPlaying();
   const videoId = nowPlaying.current?.videoId;
@@ -167,10 +231,6 @@ export async function getCurrentLiveTrackAudio(): Promise<LiveTrackAudio | null>
   };
 }
 
-/**
- * Proxy the current track audio from googlevideo (Range-aware).
- * Client should reload /live.mp3 on 'ended' to pick up the next station track.
- */
 export async function proxyCurrentTrackResponse(request?: Request): Promise<Response> {
   const track = await getCurrentLiveTrackAudio();
   if (!track) {
@@ -178,35 +238,30 @@ export async function proxyCurrentTrackResponse(request?: Request): Promise<Resp
   }
 
   const range = request?.headers.get("range") || undefined;
-  const upstream = await fetch(track.audioUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      ...(range ? { Range: range } : {})
-    },
+  const headersIn: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  };
+  if (range) headersIn.Range = range;
+
+  let upstream = await fetch(track.audioUrl, {
+    headers: headersIn,
     cache: "no-store",
     redirect: "follow"
   });
 
   if (!upstream.ok && upstream.status !== 206) {
-    // Drop cache and retry once (URL may have expired).
     urlCache.delete(track.videoId);
     const retry = await getCurrentLiveTrackAudio();
-    if (!retry) {
-      return new Response("Upstream audio failed", { status: 502 });
-    }
-    const again = await fetch(retry.audioUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ...(range ? { Range: range } : {})
-      },
+    if (!retry) return new Response("Upstream audio failed", { status: 502 });
+    upstream = await fetch(retry.audioUrl, {
+      headers: headersIn,
       cache: "no-store"
     });
-    if (!again.ok && again.status !== 206) {
+    if (!upstream.ok && upstream.status !== 206) {
       return new Response("Upstream audio failed", { status: 502 });
     }
-    return buildProxyResponse(again, retry);
+    return buildProxyResponse(upstream, retry);
   }
 
   return buildProxyResponse(upstream, track);
@@ -214,7 +269,10 @@ export async function proxyCurrentTrackResponse(request?: Request): Promise<Resp
 
 function buildProxyResponse(upstream: Response, track: LiveTrackAudio): Response {
   const headers = new Headers();
-  headers.set("Content-Type", track.contentType || upstream.headers.get("content-type") || "audio/mp4");
+  headers.set(
+    "Content-Type",
+    track.contentType || upstream.headers.get("content-type") || "audio/mp4"
+  );
   headers.set("Cache-Control", "no-store, no-cache");
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Accept-Ranges", "bytes");
