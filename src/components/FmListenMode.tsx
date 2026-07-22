@@ -84,7 +84,7 @@ export default function FmListenMode() {
           Holds Media Session / lock-screen while YouTube is the music engine. */}
       <audio
         id={LEAFLOCK_MOBILE_AUDIO_ID}
-        src="/silent.mp3"
+        src="/bg-hold.wav"
         loop
         playsInline
         preload="auto"

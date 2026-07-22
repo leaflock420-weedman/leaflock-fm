@@ -34,9 +34,13 @@ import {
 import {
   ensureMobileBackgroundAudio,
   getLeaflockMobileAudio,
+  getMobileAudioSource,
+  isPhoneUserAgent,
   kickMobileBackgroundAudio,
   pauseMobileBackgroundAudio,
-  stopMobileAudioContext
+  setMobileAudioVolume,
+  stopMobileAudioContext,
+  upgradeMobileLiveStream
 } from "@/lib/leaflock-mobile-audio";
 
 type PlayerInject = {
@@ -563,9 +567,9 @@ export default function LeafLockPlayer({
   }, []);
 
   /**
-   * Background Media Session host.
-   * Permanent #leaflockMobileAudio (same-origin silent) — never blocks YouTube play.
-   * Never pause this on visibility; only on user pause/stop.
+   * Permanent #leaflockMobileAudio — this is what keeps playing after you leave Chrome.
+   * YouTube cannot survive Chrome backgrounding; this element can.
+   * Never pause on visibility — only on user pause/stop.
    */
   const syncMediaBridge = useCallback(async (playing: boolean) => {
     if (!playing) {
@@ -582,14 +586,35 @@ export default function LeafLockPlayer({
       return;
     }
 
-    // Synchronous kick first so user-gesture is preserved for YouTube playVideo.
-    kickMobileBackgroundAudio();
+    const vol = volumeRef.current / 100;
+
+    // 1) Immediate same-origin play under user gesture (hold file) so the OS keeps the session.
+    kickMobileBackgroundAudio(Math.max(0.12, vol * 0.2));
 
     const local = mediaBridgeRef.current;
     if (local) {
-      local.volume = 0.05;
+      local.volume = Math.max(0.12, vol * 0.2);
       local.muted = false;
       void local.play().catch(() => undefined);
+    }
+
+    // 2) Live phone: upgrade to real station stream when available, then mute YouTube
+    //    so the <audio> element carries the music after Chrome is closed to Home.
+    if (listenModeRef.current === "live" && isPhoneUserAgent()) {
+      void upgradeMobileLiveStream(vol || 0.85).then((usingStream) => {
+        if (!usingStream) return;
+        try {
+          playersRef.current.a?.mute();
+          playersRef.current.b?.mute();
+          playersRef.current.a?.setVolume(0);
+          playersRef.current.b?.setVolume(0);
+        } catch {
+          // ignore
+        }
+        setMobileAudioVolume(vol || 0.85, false);
+        bindMediaSessionRef.current();
+        updateMediaSessionRef.current(true);
+      });
     }
   }, []);
 
@@ -698,6 +723,24 @@ export default function LeafLockPlayer({
   const applyDeckVolume = useCallback((deck: DeckId, gain: number) => {
     const player = getDeckPlayer(deck);
     if (!player || !playersReadyRef.current[deck]) return;
+
+    // Phone live + stream: permanent <audio> is audible (survives leaving Chrome).
+    if (
+      isPhoneUserAgent() &&
+      listenModeRef.current === "live" &&
+      getMobileAudioSource() === "stream" &&
+      userPlaybackIntentRef.current === "playing"
+    ) {
+      try {
+        player.setVolume(0);
+        player.mute();
+      } catch {
+        // ignore
+      }
+      setMobileAudioVolume(volumeRef.current / 100, false);
+      return;
+    }
+
     const scaled = Math.round(volumeRef.current * Math.min(1, Math.max(0, gain)));
     player.setVolume(scaled);
     if (scaled > 0 && volumeRef.current > 0) {
@@ -1063,10 +1106,18 @@ export default function LeafLockPlayer({
 
   useEffect(() => {
     volumeRef.current = volume;
+    if (userPlaybackIntentRef.current === "playing") {
+      const source = getMobileAudioSource();
+      if (source === "stream") {
+        setMobileAudioVolume(volume / 100, isMuted);
+      } else if (isPhoneUserAgent()) {
+        setMobileAudioVolume(Math.max(0.12, (volume / 100) * 0.2), false);
+      }
+    }
     if (!blendInProgressRef.current) {
       applyDeckVolume(activeDeckRef.current, 1);
     }
-  }, [applyDeckVolume, volume]);
+  }, [applyDeckVolume, isMuted, volume]);
 
   const resizePlayerHosts = useCallback(() => {
     const shell = videoShellRef.current;
@@ -1248,17 +1299,20 @@ export default function LeafLockPlayer({
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  // Mobile hide / app switch / lock: do nothing to YouTube or the audio element.
-  // Do not pause, stop, destroy, or reset.
+  // Leaving Chrome / Home / lock: do nothing to destroy playback.
+  // Permanent <audio> must keep running. Only user pause/stop may pause it.
 
-  // If the permanent silent host is paused by the OS while intent is playing, nudge it only.
   useEffect(() => {
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
 
     const onPause = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
+      // OS sometimes pauses — restart permanent host only (never touch YouTube here).
       void ensureMobileBackgroundAudio();
+      if (listenModeRef.current === "live" && isPhoneUserAgent()) {
+        void upgradeMobileLiveStream(volumeRef.current / 100 || 0.85);
+      }
     };
 
     audio.addEventListener("pause", onPause);
@@ -2455,8 +2509,8 @@ export default function LeafLockPlayer({
           )}
           {isMobile ? (
             <span className="mt-2 block text-xs text-zinc-500">
-              After play, lock-screen controls stay active. On Chrome tabs YouTube may duck when
-              the app is fully backgrounded — leave the player open or add to Home Screen for best results.
+              Phone audio uses a permanent player so music can keep going after you leave Chrome.
+              Pause or close the tab to stop. Best with Live room + working station stream.
             </span>
           ) : null}
           {(isPlaying || isConnected) && !isLoadingPlaylist ? (
