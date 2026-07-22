@@ -4,26 +4,26 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const EXTERNAL_STREAM_CANDIDATES = [
-  process.env.PRIMARY_STREAM_URL,
   process.env.DJ420_UPSTREAM_URL,
+  process.env.PRIMARY_STREAM_URL,
   process.env.NEXT_PUBLIC_STREAM_URL,
-  "https://stream.leaflock.com.au/live.mp3",
-  "https://stream.leaflock.com.au/main"
+  "https://stream.leaflock.com.au/live.mp3"
 ].filter((value): value is string => Boolean(value && value.trim()));
 
 function isSelfUrl(url: string): boolean {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
-    if (host === "fm.leaflock.com.au" || host === "localhost" || host === "127.0.0.1") {
-      return (
-        u.pathname === "/live.mp3" ||
-        u.pathname === "/live.pm3" ||
-        u.pathname.startsWith("/api/fm/listen")
-      );
+    if (
+      host === "fm.leaflock.com.au" ||
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host.endsWith(".onrender.com")
+    ) {
+      return u.pathname === "/live.mp3" || u.pathname.startsWith("/api/fm/listen");
     }
   } catch {
-    return url.startsWith("/live") || url.startsWith("/api/fm/listen");
+    return url.startsWith("/live.mp3") || url.startsWith("/api/fm/listen");
   }
   return false;
 }
@@ -40,9 +40,9 @@ export async function GET() {
       const upstream = await fetch(url, {
         method: "GET",
         headers: {
-          "User-Agent": "LeafLockFM-DJ420/1.0",
+          "User-Agent": "LeafLockFM/1.0",
           Range: "bytes=0-4095",
-          Accept: "audio/*,*/*"
+          Accept: "audio/mpeg,audio/*,*/*"
         },
         cache: "no-store",
         signal: controller.signal
@@ -68,8 +68,7 @@ export async function GET() {
           ok: true,
           source: "stream",
           mount: "https://fm.leaflock.com.au/live.mp3",
-          upstream: url,
-          dj420: "continuous"
+          upstream: url
         });
       }
     } catch {
@@ -82,7 +81,6 @@ export async function GET() {
     source: "hold",
     mount: "https://fm.leaflock.com.au/live.mp3",
     tried,
-    note:
-      "No external Icecast/Liquidsoap upstream. /live.mp3 is online on this host but serving hold until DJ420_UPSTREAM_URL or PRIMARY_STREAM_URL is set. Live room uses YouTube for music until then."
+    note: "https://fm.leaflock.com.au/live.mp3 is live. Upstream encoder offline — hold MP3 until DJ420_UPSTREAM_URL is set."
   });
 }

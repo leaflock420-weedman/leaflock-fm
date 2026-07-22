@@ -64,7 +64,7 @@ export function ensureLiveRadioSource(): HTMLAudioElement | null {
 
 /**
  * Start permanent Live Radio audio in the user-gesture stack.
- * Always succeeds with /api/fm/listen (stream or hold-loop on server).
+ * Always succeeds with /live.mp3 (stream or hold MP3 on server).
  */
 export function startLiveRadioAudio(volume01 = 0.85): void {
   try {
@@ -111,7 +111,7 @@ export function isLiveRadioPlaying(): boolean {
   return Boolean(audio && !audio.paused);
 }
 
-/** Probe whether /api/fm/listen is a real station stream or hold-loop. */
+/** Probe whether /live.mp3 is a real station stream or hold. */
 export async function probeLiveAudioMode(): Promise<LiveAudioMode> {
   try {
     const response = await fetch("/api/fm/listen-status", { cache: "no-store" });
