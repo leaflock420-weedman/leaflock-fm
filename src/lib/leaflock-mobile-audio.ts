@@ -1,7 +1,11 @@
 /**
  * Permanent mobile playback bridge.
- * One real <audio id="leaflockMobileAudio"> — never destroy, never clear src between songs.
- * Only pause on explicit user pause/stop or fatal error.
+ *
+ * Rules:
+ * - One real <audio id="leaflockMobileAudio"> for the phone
+ * - Never destroy / recreate / clear src between songs
+ * - Never pause on page hide / app switch / lock
+ * - Only pause on explicit user pause/stop or fatal media error
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
@@ -11,17 +15,28 @@ const STREAM_URL =
 const STREAM_FALLBACK_URL =
   process.env.NEXT_PUBLIC_STREAM_FALLBACK_URL ??
   "https://stream.live.vc.bbcmedia.co.uk/bbc_6music";
-const SILENT_URL = "/silent.mp3";
 
 export type MobileAudioKind = "stream" | "silent";
 
-function resolveTargetUrl(kind: MobileAudioKind): string {
-  return kind === "stream" ? STREAM_URL : SILENT_URL;
+export type MobilePlayResult = {
+  ok: boolean;
+  /** True when live stream (or stream fallback) is the audible source */
+  usingStream: boolean;
+};
+
+function silentUrl(): string {
+  if (typeof window === "undefined") return "/silent.mp3";
+  return `${window.location.origin}/silent.mp3`;
+}
+
+export function isPhoneUserAgent(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 }
 
 /**
  * Returns the permanent mobile audio element.
- * Creates it once on document.body if missing (survives React remounts).
+ * Uses the markup element when present; creates once on body if missing.
  */
 export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   if (typeof document === "undefined") return null;
@@ -39,30 +54,31 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   audio.preload = "auto";
   audio.setAttribute("aria-hidden", "true");
   audio.className = "pointer-events-none absolute h-px w-px opacity-0";
+  // Default same-origin silent loop so Media Session has a real source immediately.
+  audio.loop = true;
+  audio.src = silentUrl();
+  audio.dataset.leaflockSrc = "silent";
   document.body.appendChild(audio);
   return audio;
 }
 
 /**
- * Set src only when kind changes. Never clear between songs.
+ * Assign src only when the bound kind changes. Never clear between songs.
  */
-export function ensureMobileAudioSrc(kind: MobileAudioKind): HTMLAudioElement | null {
-  const audio = getLeaflockMobileAudio();
-  if (!audio) return null;
-
-  const target = resolveTargetUrl(kind);
-  const bound = audio.dataset.leaflockSrc ?? "";
-
-  if (bound === target && audio.src) {
-    return audio;
+function bindSrc(audio: HTMLAudioElement, kind: MobileAudioKind, url: string): void {
+  const label = kind;
+  if (audio.dataset.leaflockSrc === label && audio.src) {
+    return;
   }
-
-  audio.dataset.leaflockSrc = target;
+  audio.dataset.leaflockSrc = label;
   audio.loop = kind === "silent";
-  audio.src = target;
-  // load once when assigning a new mount — not between tracks of same kind
-  audio.load();
-  return audio;
+  audio.src = url;
+  // load only when switching mount kind — not between tracks
+  try {
+    audio.load();
+  } catch {
+    // Ignore load errors; play() will report failure.
+  }
 }
 
 export function setMobileAudioVolume(volume01: number, muted: boolean): void {
@@ -73,35 +89,44 @@ export function setMobileAudioVolume(volume01: number, muted: boolean): void {
   audio.muted = muted || vol === 0;
 }
 
-/**
- * Start / resume permanent mobile audio. Safe to call repeatedly — does not clear src.
- */
-export async function playMobileAudio(kind: MobileAudioKind): Promise<boolean> {
-  const audio = ensureMobileAudioSrc(kind);
-  if (!audio) return false;
+async function tryPlay(audio: HTMLAudioElement): Promise<void> {
+  // Always call play() — do not skip when !paused (can be stuck buffering).
+  const p = audio.play();
+  if (p !== undefined) {
+    await p;
+  }
+}
 
-  try {
-    if (audio.paused) {
-      await audio.play();
-    }
-    return true;
-  } catch {
-    if (kind === "stream") {
+/**
+ * Start / resume permanent mobile audio.
+ * Live: try station stream, then stream fallback, then same-origin silent.
+ * Solo: silent loop (Media Session bridge).
+ * Never clears src on success path between songs of the same kind.
+ */
+export async function playMobileAudio(kind: MobileAudioKind): Promise<MobilePlayResult> {
+  const audio = getLeaflockMobileAudio();
+  if (!audio) return { ok: false, usingStream: false };
+
+  if (kind === "stream") {
+    const streamCandidates = [STREAM_URL, STREAM_FALLBACK_URL];
+    for (const url of streamCandidates) {
       try {
-        const bound = audio.dataset.leaflockSrc ?? "";
-        if (bound !== STREAM_FALLBACK_URL) {
-          audio.dataset.leaflockSrc = STREAM_FALLBACK_URL;
-          audio.loop = false;
-          audio.src = STREAM_FALLBACK_URL;
-          audio.load();
-          await audio.play();
-          return true;
-        }
+        bindSrc(audio, "stream", url);
+        await tryPlay(audio);
+        return { ok: true, usingStream: true };
       } catch {
-        // fall through
+        // Try next candidate.
       }
     }
-    return false;
+  }
+
+  try {
+    bindSrc(audio, "silent", silentUrl());
+    // Near-silent volume for solo bridge is applied by caller.
+    await tryPlay(audio);
+    return { ok: true, usingStream: false };
+  } catch {
+    return { ok: false, usingStream: false };
   }
 }
 
@@ -111,7 +136,11 @@ export async function playMobileAudio(kind: MobileAudioKind): Promise<boolean> {
 export function pauseMobileAudio(): void {
   const audio = getLeaflockMobileAudio();
   if (!audio) return;
-  audio.pause();
+  try {
+    audio.pause();
+  } catch {
+    // Ignore.
+  }
 }
 
 export function isMobileAudioPlaying(): boolean {

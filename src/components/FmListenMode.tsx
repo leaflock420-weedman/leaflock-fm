@@ -78,9 +78,12 @@ export default function FmListenMode() {
 
   return (
     <div className="space-y-6">
-      {/* Permanent mobile media element — never remount with LeafLockPlayer key={mode}. */}
+      {/* Permanent phone media element — never remount with LeafLockPlayer key={mode}.
+          Do not destroy, do not clear src between songs, do not pause on hide. */}
       <audio
         id={LEAFLOCK_MOBILE_AUDIO_ID}
+        src="/silent.mp3"
+        loop
         playsInline
         preload="auto"
         className="pointer-events-none absolute h-px w-px opacity-0"
