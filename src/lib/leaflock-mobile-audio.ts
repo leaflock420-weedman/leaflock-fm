@@ -12,15 +12,12 @@ export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
 
 const STREAM_URL =
   process.env.NEXT_PUBLIC_STREAM_URL ?? "https://stream.leaflock.com.au/main";
-const STREAM_FALLBACK_URL =
-  process.env.NEXT_PUBLIC_STREAM_FALLBACK_URL ??
-  "https://stream.live.vc.bbcmedia.co.uk/bbc_6music";
 
 export type MobileAudioKind = "stream" | "silent";
 
 export type MobilePlayResult = {
   ok: boolean;
-  /** True when live stream (or stream fallback) is the audible source */
+  /** True when the live station stream is the audible source */
   usingStream: boolean;
 };
 
@@ -108,15 +105,12 @@ export async function playMobileAudio(kind: MobileAudioKind): Promise<MobilePlay
   if (!audio) return { ok: false, usingStream: false };
 
   if (kind === "stream") {
-    const streamCandidates = [STREAM_URL, STREAM_FALLBACK_URL];
-    for (const url of streamCandidates) {
-      try {
-        bindSrc(audio, "stream", url);
-        await tryPlay(audio);
-        return { ok: true, usingStream: true };
-      } catch {
-        // Try next candidate.
-      }
+    try {
+      bindSrc(audio, "stream", STREAM_URL);
+      await tryPlay(audio);
+      return { ok: true, usingStream: true };
+    } catch {
+      // Fall through to same-origin silent Media Session bridge.
     }
   }
 
