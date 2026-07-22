@@ -1,25 +1,19 @@
 /**
- * Permanent mobile playback bridge.
+ * Permanent phone media element for background / lock-screen.
+ *
+ * YouTube iframes cannot keep audio in a background Chrome tab.
+ * This real <audio> element holds the Media Session so the OS keeps
+ * the session alive. It never blocks the original YouTube player.
  *
  * Rules:
- * - One real <audio id="leaflockMobileAudio"> for the phone
+ * - One element: #leaflockMobileAudio
  * - Never destroy / recreate / clear src between songs
- * - Never pause on page hide / app switch / lock
- * - Only pause on explicit user pause/stop or fatal media error
+ * - Never pause on hide / app switch / lock
+ * - Only pause on explicit user pause/stop
+ * - Never throw into the UI play path — always best-effort
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
-
-const STREAM_URL =
-  process.env.NEXT_PUBLIC_STREAM_URL ?? "https://stream.leaflock.com.au/main";
-
-export type MobileAudioKind = "stream" | "silent";
-
-export type MobilePlayResult = {
-  ok: boolean;
-  /** True when the live station stream is the audible source */
-  usingStream: boolean;
-};
 
 function silentUrl(): string {
   if (typeof window === "undefined") return "/silent.mp3";
@@ -31,10 +25,6 @@ export function isPhoneUserAgent(): boolean {
   return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 }
 
-/**
- * Returns the permanent mobile audio element.
- * Uses the markup element when present; creates once on body if missing.
- */
 export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   if (typeof document === "undefined") return null;
 
@@ -49,99 +39,106 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   audio.setAttribute("playsinline", "true");
   audio.setAttribute("webkit-playsinline", "true");
   audio.preload = "auto";
-  audio.setAttribute("aria-hidden", "true");
-  audio.className = "pointer-events-none absolute h-px w-px opacity-0";
-  // Default same-origin silent loop so Media Session has a real source immediately.
   audio.loop = true;
   audio.src = silentUrl();
   audio.dataset.leaflockSrc = "silent";
+  audio.setAttribute("aria-hidden", "true");
+  audio.className = "pointer-events-none absolute h-px w-px opacity-0";
   document.body.appendChild(audio);
   return audio;
 }
 
 /**
- * Assign src only when the bound kind changes. Never clear between songs.
+ * Kick permanent media inside the same user-gesture stack as Play.
+ * Must call audio.play() synchronously (do not await before YouTube playVideo).
+ * Always uses same-origin silent.mp3. Never throws.
  */
-function bindSrc(audio: HTMLAudioElement, kind: MobileAudioKind, url: string): void {
-  const label = kind;
-  if (audio.dataset.leaflockSrc === label && audio.src) {
-    return;
-  }
-  audio.dataset.leaflockSrc = label;
-  audio.loop = kind === "silent";
-  audio.src = url;
-  // load only when switching mount kind — not between tracks
+export function kickMobileBackgroundAudio(): void {
   try {
-    audio.load();
-  } catch {
-    // Ignore load errors; play() will report failure.
-  }
-}
+    const audio = getLeaflockMobileAudio();
+    if (!audio) return;
 
-export function setMobileAudioVolume(volume01: number, muted: boolean): void {
-  const audio = getLeaflockMobileAudio();
-  if (!audio) return;
-  const vol = Math.min(1, Math.max(0, volume01));
-  audio.volume = vol;
-  audio.muted = muted || vol === 0;
-}
-
-async function tryPlay(audio: HTMLAudioElement): Promise<void> {
-  // Always call play() — do not skip when !paused (can be stuck buffering).
-  const p = audio.play();
-  if (p !== undefined) {
-    await p;
-  }
-}
-
-/**
- * Start / resume permanent mobile audio.
- * Live: try station stream, then stream fallback, then same-origin silent.
- * Solo: silent loop (Media Session bridge).
- * Never clears src on success path between songs of the same kind.
- */
-export async function playMobileAudio(kind: MobileAudioKind): Promise<MobilePlayResult> {
-  const audio = getLeaflockMobileAudio();
-  if (!audio) return { ok: false, usingStream: false };
-
-  if (kind === "stream") {
-    try {
-      bindSrc(audio, "stream", STREAM_URL);
-      await tryPlay(audio);
-      return { ok: true, usingStream: true };
-    } catch {
-      // Fall through to same-origin silent Media Session bridge.
+    // Keep src stable — do not clear between songs.
+    if (audio.dataset.leaflockSrc !== "silent" || !audio.getAttribute("src")) {
+      audio.dataset.leaflockSrc = "silent";
+      audio.loop = true;
+      audio.src = silentUrl();
     }
-  }
 
-  try {
-    bindSrc(audio, "silent", silentUrl());
-    // Near-silent volume for solo bridge is applied by caller.
-    await tryPlay(audio);
-    return { ok: true, usingStream: false };
+    // Near-silent but non-zero: some Android builds drop fully-silent streams.
+    audio.muted = false;
+    audio.volume = 0.05;
+
+    // Fire play() in this tick so it inherits the user gesture.
+    void audio.play().catch(() => undefined);
+    ensureMobileAudioContext();
   } catch {
-    return { ok: false, usingStream: false };
+    // Best-effort only.
   }
 }
+
+/** Async ensure (for pause-recovery). Never throws. */
+export async function ensureMobileBackgroundAudio(): Promise<boolean> {
+  try {
+    kickMobileBackgroundAudio();
+    const audio = getLeaflockMobileAudio();
+    if (!audio) return false;
+    if (audio.paused) {
+      await audio.play();
+    }
+    return !audio.paused;
+  } catch {
+    return false;
+  }
+}
+
+/** User pause/stop only. Never clear src. */
+export function pauseMobileBackgroundAudio(): void {
+  try {
+    const audio = getLeaflockMobileAudio();
+    audio?.pause();
+  } catch {
+    // ignore
+  }
+}
+
+let audioContext: AudioContext | null = null;
+let oscillator: OscillatorNode | null = null;
 
 /**
- * User pause / stop only. Does not clear src. Does not destroy the element.
+ * Optional Web Audio hold — some phones keep the media session longer
+ * when a tiny oscillator is running alongside <audio>.
  */
-export function pauseMobileAudio(): void {
-  const audio = getLeaflockMobileAudio();
-  if (!audio) return;
+export function ensureMobileAudioContext(): void {
   try {
-    audio.pause();
+    type WebKitWindow = Window & { webkitAudioContext?: typeof AudioContext };
+    const Ctor = window.AudioContext || (window as WebKitWindow).webkitAudioContext;
+    if (!Ctor) return;
+
+    if (!audioContext) {
+      audioContext = new Ctor();
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      gain.gain.value = 0.00001;
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.start();
+      oscillator = osc;
+    }
+    void audioContext.resume();
   } catch {
-    // Ignore.
+    // Optional.
   }
 }
 
-export function isMobileAudioPlaying(): boolean {
-  const audio = getLeaflockMobileAudio();
-  return Boolean(audio && !audio.paused);
-}
-
-export function mobileAudioKindForMode(listenMode: "live" | "solo"): MobileAudioKind {
-  return listenMode === "live" ? "stream" : "silent";
+export function stopMobileAudioContext(): void {
+  try {
+    oscillator?.stop();
+    oscillator?.disconnect();
+    oscillator = null;
+    void audioContext?.close();
+    audioContext = null;
+  } catch {
+    // ignore
+  }
 }

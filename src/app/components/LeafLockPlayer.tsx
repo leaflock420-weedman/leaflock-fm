@@ -31,6 +31,13 @@ import {
   savePlayHistory,
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
+import {
+  ensureMobileBackgroundAudio,
+  getLeaflockMobileAudio,
+  kickMobileBackgroundAudio,
+  pauseMobileBackgroundAudio,
+  stopMobileAudioContext
+} from "@/lib/leaflock-mobile-audio";
 
 type PlayerInject = {
   source: "owner" | "jukebox";
@@ -555,21 +562,34 @@ export default function LeafLockPlayer({
     }
   }, []);
 
+  /**
+   * Background Media Session host.
+   * Permanent #leaflockMobileAudio (same-origin silent) — never blocks YouTube play.
+   * Never pause this on visibility; only on user pause/stop.
+   */
   const syncMediaBridge = useCallback(async (playing: boolean) => {
-    const bridge = mediaBridgeRef.current;
-    if (!bridge) return;
-
-    bridge.volume = 0.001;
-    bridge.muted = false;
-
-    if (playing) {
-      try {
-        await bridge.play();
-      } catch {
-        // Bridge play can fail before a user gesture; retry on next play tap.
+    if (!playing) {
+      pauseMobileBackgroundAudio();
+      stopMobileAudioContext();
+      const local = mediaBridgeRef.current;
+      if (local) {
+        try {
+          local.pause();
+        } catch {
+          // ignore
+        }
       }
-    } else {
-      bridge.pause();
+      return;
+    }
+
+    // Synchronous kick first so user-gesture is preserved for YouTube playVideo.
+    kickMobileBackgroundAudio();
+
+    const local = mediaBridgeRef.current;
+    if (local) {
+      local.volume = 0.05;
+      local.muted = false;
+      void local.play().catch(() => undefined);
     }
   }, []);
 
@@ -1228,8 +1248,22 @@ export default function LeafLockPlayer({
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  // Mobile hide / app switch / lock: do nothing.
-  // Do not pause, stop, destroy, or reset the original YouTube player.
+  // Mobile hide / app switch / lock: do nothing to YouTube or the audio element.
+  // Do not pause, stop, destroy, or reset.
+
+  // If the permanent silent host is paused by the OS while intent is playing, nudge it only.
+  useEffect(() => {
+    const audio = getLeaflockMobileAudio();
+    if (!audio) return;
+
+    const onPause = () => {
+      if (userPlaybackIntentRef.current !== "playing") return;
+      void ensureMobileBackgroundAudio();
+    };
+
+    audio.addEventListener("pause", onPause);
+    return () => audio.removeEventListener("pause", onPause);
+  }, []);
 
   useEffect(() => {
     if (listenMode !== "live" || !playlistReady || !playersReady) return;
@@ -1792,9 +1826,11 @@ export default function LeafLockPlayer({
     setPlaybackError(null);
     setIsBuffering(true);
 
-    // Original YouTube player is authoritative. Silent bridge is best-effort only.
+    // 1) Start permanent background audio host inside this user gesture (best-effort).
+    // 2) Original YouTube player remains authoritative for music + live sync.
     void syncMediaBridge(true);
     bindMediaSessionRef.current();
+    updateMediaSessionRef.current(true);
 
     if (listenModeRef.current === "live") {
       void fetchLiveStation()
@@ -2419,7 +2455,8 @@ export default function LeafLockPlayer({
           )}
           {isMobile ? (
             <span className="mt-2 block text-xs text-zinc-500">
-              Background listening: use the bottom bar or lock-screen play/pause while you browse.
+              After play, lock-screen controls stay active. On Chrome tabs YouTube may duck when
+              the app is fully backgrounded — leave the player open or add to Home Screen for best results.
             </span>
           ) : null}
           {(isPlaying || isConnected) && !isLoadingPlaylist ? (
