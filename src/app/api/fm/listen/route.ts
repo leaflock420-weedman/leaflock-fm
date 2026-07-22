@@ -10,19 +10,17 @@ export const maxDuration = 300;
 /**
  * https://fm.leaflock.com.au/live.mp3
  *
- * DJ420 continuous track audio:
- * 1) Prefer external Icecast/Liquidsoap if DJ420_UPSTREAM_URL is set
- * 2) Else stream the current station track audio via yt-dlp (real music)
- * 3) Client reloads /live.mp3 on ended → next station track (no src change of mount path)
+ * 1) Optional Icecast/Liquidsoap upstream (DJ420_UPSTREAM_URL)
+ * 2) DJ420 current-track audio via yt-dlp (real songs → works in background)
+ * 3) Hold MP3 so the mount never hard-fails
  */
 
-const EXTERNAL = [
-  process.env.DJ420_UPSTREAM_URL,
-  process.env.PRIMARY_STREAM_URL
-].filter((v): v is string => Boolean(v && v.trim() && !v.includes("fm.leaflock.com.au")));
+async function tryExternal(): Promise<Response | null> {
+  const urls = [process.env.DJ420_UPSTREAM_URL, process.env.PRIMARY_STREAM_URL].filter(
+    (v): v is string => Boolean(v && v.trim() && !v.includes("fm.leaflock.com.au"))
+  );
 
-async function tryExternalStream(): Promise<Response | null> {
-  for (const url of EXTERNAL) {
+  for (const url of urls) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 4000);
@@ -55,37 +53,41 @@ async function tryExternalStream(): Promise<Response | null> {
 }
 
 async function serveHold(): Promise<Response> {
-  const filePath = path.join(process.cwd(), "public", "live-hold.mp3");
-  try {
-    const file = await readFile(filePath);
-    return new NextResponse(file, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/mpeg",
-        "Content-Length": String(file.length),
-        "Cache-Control": "no-store",
-        "Access-Control-Allow-Origin": "*",
-        "X-LeafLock-Audio-Source": "hold",
-        "X-LeafLock-Mount": "https://fm.leaflock.com.au/live.mp3"
-      }
-    });
-  } catch {
-    return NextResponse.json({ error: "live.mp3 unavailable" }, { status: 503 });
+  for (const name of ["live-hold.mp3", "silent.mp3"]) {
+    try {
+      const file = await readFile(path.join(process.cwd(), "public", name));
+      return new NextResponse(file, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Content-Length": String(file.length),
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*",
+          "X-LeafLock-Audio-Source": "hold",
+          "X-LeafLock-Mount": "https://fm.leaflock.com.au/live.mp3"
+        }
+      });
+    } catch {
+      // next file
+    }
   }
+  return NextResponse.json({ error: "live.mp3 unavailable" }, { status: 503 });
 }
 
 export async function GET(request: Request) {
-  // 1) Real encoder if configured
-  const external = await tryExternalStream();
+  const external = await tryExternal();
   if (external) return external;
 
-  // 2) DJ420 current track audio (YouTube → googlevideo proxy)
   try {
-    return await proxyCurrentTrackResponse(request);
+    const proxied = await proxyCurrentTrackResponse(request);
+    // Important: 503/502 must fall through to hold, not return as audio.
+    if (proxied.status === 200 || proxied.status === 206) {
+      return proxied;
+    }
+    console.error("[live.mp3] track proxy status", proxied.status);
   } catch (error) {
     console.error("[live.mp3] track proxy failed", error);
   }
 
-  // 3) Last resort hold
   return serveHold();
 }
