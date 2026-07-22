@@ -25,10 +25,12 @@ services:
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
       - key: NEXT_PUBLIC_YOUTUBE_PLAYLIST_ID
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
+      - key: PRIMARY_STREAM_URL
+        value: https://stream.leaflock.com.au/live.mp3
       - key: NEXT_PUBLIC_STREAM_URL
-        value: https://stream.leaflock.com.au/main
+        value: https://stream.leaflock.com.au/live.mp3
       - key: NEXT_PUBLIC_STREAM_FALLBACK_URL
-        value: https://stream.live.vc.bbcmedia.co.uk/bbc_6music
+        value: https://stream.leaflock.com.au/live.mp3
       - key: YOUTUBE_API_KEY
         value: AIzaSyD4f1Oc6R9xC58TSiS99BvayekV29rZO2A
       - key: FM_ADMIN_SECRET

@@ -3,9 +3,12 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+const DEFAULT_LIVE_MOUNT = "https://stream.leaflock.com.au/live.mp3";
+
 const STREAM_CANDIDATES = [
   process.env.PRIMARY_STREAM_URL,
   process.env.NEXT_PUBLIC_STREAM_URL,
+  DEFAULT_LIVE_MOUNT,
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
 

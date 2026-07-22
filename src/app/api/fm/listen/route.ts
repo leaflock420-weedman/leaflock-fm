@@ -17,9 +17,14 @@ export const runtime = "nodejs";
  * 2) Continuous loop of bg-hold.wav so the element never ends (keeps session alive)
  */
 
+/** DJ420 Liquidsoap → Icecast public mount (server-side crossfade). */
+const DEFAULT_LIVE_MOUNT = "https://stream.leaflock.com.au/live.mp3";
+
 const STREAM_CANDIDATES = [
   process.env.PRIMARY_STREAM_URL,
   process.env.NEXT_PUBLIC_STREAM_URL,
+  DEFAULT_LIVE_MOUNT,
+  // Legacy mounts (fallback only)
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
 

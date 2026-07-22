@@ -1,0 +1,38 @@
+# Optional: run DJ420 Liquidsoap + Icecast for continuous Live Radio.
+# Public mount: https://stream.leaflock.com.au/live.mp3
+#
+# Usage:
+#   cd liquidsoap
+#   export ICECAST_SOURCE_PASSWORD=your-source-password
+#   docker compose up -d
+#
+# Point DNS stream.leaflock.com.au → this host (ports 80/443 or 8000).
+
+services:
+  icecast:
+    image: moul/icecast
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-hackme}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:-hackme}
+      ICECAST_PASSWORD: ${ICECAST_PASSWORD:-hackme}
+      ICECAST_HOSTNAME: stream.leaflock.com.au
+
+  liquidsoap:
+    image: savonet/liquidsoap:v2.2.5
+    restart: unless-stopped
+    depends_on:
+      - icecast
+    environment:
+      ICECAST_HOST: icecast
+      ICECAST_PORT: "8000"
+      ICECAST_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-hackme}
+      ICECAST_MOUNT: /live.mp3
+      DJ420_PLAYLIST: /app/playlists/main.m3u
+    volumes:
+      - ./dj420.liq:/app/dj420.liq:ro
+      - ../playlists:/app/playlists:ro
+      - ../media:/app/media:ro
+    command: ["liquidsoap", "/app/dj420.liq"]
