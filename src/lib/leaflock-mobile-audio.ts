@@ -2,11 +2,14 @@
  * Permanent Live Radio <audio> element.
  *
  * Keeps playing after the user leaves Chrome (YouTube iframes cannot).
- * Source is always /api/fm/listen — set once, never swapped per song.
+ * Source is always /api/fm/listen (same-origin proxy) — set once, never swapped per song.
+ * Upstream: DJ420 Liquidsoap → https://stream.leaflock.com.au/live.mp3
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
 export const LIVE_RADIO_STREAM_PATH = "/api/fm/listen";
+export const DJ420_PUBLIC_STREAM_URL =
+  process.env.NEXT_PUBLIC_STREAM_URL ?? "https://stream.leaflock.com.au/live.mp3";
 
 export type LiveAudioMode = "stream" | "hold-loop" | "unknown";
 
