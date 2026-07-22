@@ -19,7 +19,10 @@ Icecast listen URL (raw):
 
 `http://YOUR_HOST:8000/live.mp3`
 
-Point `stream.leaflock.com.au` at that host and terminate TLS (Caddy/nginx) so clients use:
+**DNS (required):** create an A/CNAME record for `stream.leaflock.com.au` pointing at this host.
+Without DNS, `nslookup stream.leaflock.com.au` fails and the app cannot use Liquidsoap.
+
+Terminate TLS (Caddy/nginx) so clients use:
 
 `https://stream.leaflock.com.au/live.mp3`
 

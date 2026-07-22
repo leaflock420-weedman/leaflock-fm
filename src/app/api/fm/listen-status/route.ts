@@ -12,19 +12,19 @@ const STREAM_CANDIDATES = [
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
 
-/**
- * Status of DJ420 continuous Live Radio mount used by /api/fm/listen.
- */
 export async function GET() {
+  const tried: string[] = [];
+
   for (const url of STREAM_CANDIDATES) {
+    tried.push(url);
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
+      const timer = setTimeout(() => controller.abort(), 3500);
       const upstream = await fetch(url, {
         method: "GET",
         headers: {
           "User-Agent": "LeafLockFM-DJ420/1.0",
-          Range: "bytes=0-2047",
+          Range: "bytes=0-4095",
           Accept: "audio/*,*/*"
         },
         cache: "no-store",
@@ -62,9 +62,11 @@ export async function GET() {
 
   return NextResponse.json({
     ok: true,
-    source: "hold-loop",
+    source: "hold",
     mount: "/api/fm/listen",
     dj420: "continuous",
-    note: "Upstream station stream offline — continuous hold loop active. Set PRIMARY_STREAM_URL to AzuraCast for full music."
+    tried,
+    note:
+      "stream.leaflock.com.au/live.mp3 is unreachable. Live room uses YouTube for music until Liquidsoap/Icecast is online. DNS for stream.leaflock.com.au must point at your Icecast host."
   });
 }
