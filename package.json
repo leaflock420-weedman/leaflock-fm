@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
-    "build": "node scripts/create-silent-audio.mjs && node scripts/make-logo-transparent.mjs && prisma generate && next build",
+    "postinstall": "node scripts/install-ytdlp.mjs",
+    "build": "node scripts/install-ytdlp.mjs && node scripts/create-silent-audio.mjs && node scripts/make-logo-transparent.mjs && prisma generate && next build",
     "start": "next start -H 0.0.0.0",
     "postbuild": "node scripts/prepare-standalone.mjs",
     "start:standalone": "node .next/standalone/server.js",
@@ -19,12 +20,14 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.797.0",
     "@aws-sdk/s3-request-presigner": "^3.797.0",
+    "@distube/ytdl-core": "^4.16.12",
     "@prisma/client": "^6.14.0",
     "@tailwindcss/postcss": "^4.3.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.13.10",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
+    "@ybd-project/ytdl-core": "^6.0.8",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.43.1",
     "eslint": "^9.22.0",
@@ -40,6 +43,7 @@
     "sharp": "^0.34.2",
     "tailwindcss": "^4.3.1",
     "typescript": "^5.8.2",
+    "youtubei.js": "^17.2.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

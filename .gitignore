@@ -8,3 +8,4 @@ dist
 *.log
 prisma/dev.db
 data/
+bin/

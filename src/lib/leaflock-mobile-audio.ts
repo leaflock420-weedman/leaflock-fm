@@ -49,29 +49,72 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   return audio;
 }
 
-/** Bind Live Radio mount once. Never change src between songs. */
-export function ensureLiveRadioSource(): HTMLAudioElement | null {
+/**
+ * Bind Live Radio mount. Path is always /live.mp3 (never changes).
+ * Cache-bust query only reloads the current station track payload.
+ */
+export function ensureLiveRadioSource(forceReload = false): HTMLAudioElement | null {
   const audio = getLeaflockMobileAudio();
   if (!audio) return null;
 
-  if (audio.dataset.leaflockMode !== "live-radio") {
-    audio.dataset.leaflockMode = "live-radio";
-    audio.loop = true;
-    audio.src = liveStreamUrl();
+  audio.dataset.leaflockMode = "live-radio";
+  // Do not loop a single track forever — on ended we reload /live.mp3 for the next song.
+  audio.loop = false;
+
+  const base = liveStreamUrl();
+  if (forceReload || !audio.getAttribute("src")?.includes("/live.mp3")) {
+    audio.src = `${base}?t=${Date.now()}`;
   }
   return audio;
 }
 
+function applyLiveOffset(audio: HTMLAudioElement) {
+  // Server may send start offset via header; client also reads data attribute after fetch.
+  const offset = Number(audio.dataset.leaflockOffset || "0");
+  if (!Number.isFinite(offset) || offset < 1) return;
+  try {
+    if (audio.seekable.length > 0 || audio.duration > offset) {
+      audio.currentTime = offset;
+    }
+  } catch {
+    // ignore seek errors
+  }
+}
+
 /**
  * Start permanent Live Radio audio in the user-gesture stack.
- * Always succeeds with /live.mp3 (stream or hold MP3 on server).
+ * Full volume — this is the real music path for live room.
  */
 export function startLiveRadioAudio(volume01 = 0.85): void {
   try {
-    const audio = ensureLiveRadioSource();
+    const audio = ensureLiveRadioSource(true);
     if (!audio) return;
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.15, volume01));
+    audio.volume = Math.min(1, Math.max(0.35, volume01));
+
+    // Sync start position to DJ420 timeline when metadata is ready.
+    void fetch("/api/fm/now-playing", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((np: { currentOffsetSeconds?: number }) => {
+        audio.dataset.leaflockOffset = String(
+          Math.max(0, Math.floor(np.currentOffsetSeconds ?? 0))
+        );
+        applyLiveOffset(audio);
+      })
+      .catch(() => undefined);
+
+    const onMeta = () => {
+      applyLiveOffset(audio);
+    };
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener(
+      "canplay",
+      () => {
+        applyLiveOffset(audio);
+      },
+      { once: true }
+    );
+
     void audio.play().catch(() => undefined);
   } catch {
     // never throw into UI
@@ -80,14 +123,30 @@ export function startLiveRadioAudio(volume01 = 0.85): void {
 
 export async function resumeLiveRadioAudio(volume01 = 0.85): Promise<boolean> {
   try {
-    const audio = ensureLiveRadioSource();
+    const audio = ensureLiveRadioSource(false);
     if (!audio) return false;
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.15, volume01));
+    audio.volume = Math.min(1, Math.max(0.35, volume01));
     if (audio.paused) await audio.play();
     return !audio.paused;
   } catch {
     return false;
+  }
+}
+
+/**
+ * When a track ends, reload the same mount path for the next DJ420 track.
+ * Safe to call while backgrounded once a media session is active.
+ */
+export function advanceLiveRadioToNextTrack(volume01 = 0.85): void {
+  try {
+    const audio = ensureLiveRadioSource(true);
+    if (!audio) return;
+    audio.muted = false;
+    audio.volume = Math.min(1, Math.max(0.35, volume01));
+    void audio.play().catch(() => undefined);
+  } catch {
+    // ignore
   }
 }
 
