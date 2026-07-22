@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -31,14 +31,6 @@ import {
   savePlayHistory,
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
-import {
-  getLeaflockMobileAudio,
-  isPhoneUserAgent,
-  mobileAudioKindForMode,
-  pauseMobileAudio,
-  playMobileAudio,
-  setMobileAudioVolume
-} from "@/lib/leaflock-mobile-audio";
 
 type PlayerInject = {
   source: "owner" | "jukebox";
@@ -135,9 +127,16 @@ function loadYouTubeApi(): Promise<YTNamespace> {
       return;
     }
 
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
     const resolveIfReady = () => {
       if (window.YT?.Player) {
-        resolve(window.YT);
+        finish(() => resolve(window.YT as YTNamespace));
         return true;
       }
       return false;
@@ -149,7 +148,8 @@ function loadYouTubeApi(): Promise<YTNamespace> {
       script.id = "youtube-iframe-api";
       script.src = "https://www.youtube.com/iframe_api";
       script.async = true;
-      script.onerror = () => reject(new Error("Failed to load YouTube player API"));
+      script.onerror = () =>
+        finish(() => reject(new Error("Failed to load YouTube player API")));
       document.body.appendChild(script);
     } else if (resolveIfReady()) {
       return;
@@ -158,9 +158,7 @@ function loadYouTubeApi(): Promise<YTNamespace> {
     const previous = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
       previous?.();
-      if (!resolveIfReady()) {
-        reject(new Error("YouTube player API unavailable"));
-      }
+      resolveIfReady();
     };
 
     const poll = window.setInterval(() => {
@@ -169,7 +167,16 @@ function loadYouTubeApi(): Promise<YTNamespace> {
       }
     }, 100);
 
-    window.setTimeout(() => window.clearInterval(poll), 10000);
+    window.setTimeout(() => {
+      window.clearInterval(poll);
+      if (!settled) {
+        if (!resolveIfReady()) {
+          finish(() =>
+            reject(new Error("Failed to load YouTube player API"))
+          );
+        }
+      }
+    }, 20000);
   });
 }
 
@@ -329,6 +336,7 @@ export default function LeafLockPlayer({
 
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const videoShellRef = useRef<HTMLDivElement | null>(null);
+  const mediaBridgeRef = useRef<HTMLAudioElement | null>(null);
   const playersRef = useRef<Record<DeckId, YTPlayer | null>>({ a: null, b: null });
   const playersReadyRef = useRef<Record<DeckId, boolean>>({ a: false, b: false });
   const playerInitRef = useRef(false);
@@ -360,8 +368,6 @@ export default function LeafLockPlayer({
   const stationEndedAtRef = useRef(0);
   const listenModeRef = useRef(listenMode);
   const userPlaybackIntentRef = useRef<"playing" | "paused" | "stopped">("stopped");
-  const isMobileRef = useRef(false);
-  const isMutedRef = useRef(false);
   const liveStationJoinedRef = useRef(false);
 
   const syncPreviousState = useCallback(() => {
@@ -547,9 +553,22 @@ export default function LeafLockPlayer({
     }
   }, []);
 
-  const pauseMobileBridge = useCallback(() => {
-    if (!isMobileRef.current) return;
-    pauseMobileAudio();
+  const syncMediaBridge = useCallback(async (playing: boolean) => {
+    const bridge = mediaBridgeRef.current;
+    if (!bridge) return;
+
+    bridge.volume = 0.001;
+    bridge.muted = false;
+
+    if (playing) {
+      try {
+        await bridge.play();
+      } catch {
+        // Bridge play can fail before a user gesture; retry on next play tap.
+      }
+    } else {
+      bridge.pause();
+    }
   }, []);
 
   const syncPlaybackProgress = useCallback(() => {
@@ -657,60 +676,12 @@ export default function LeafLockPlayer({
   const applyDeckVolume = useCallback((deck: DeckId, gain: number) => {
     const player = getDeckPlayer(deck);
     if (!player || !playersReadyRef.current[deck]) return;
-
-    // Phone + live stream: YouTube is muted — stream audio carries sound.
-    if (
-      isMobileRef.current &&
-      listenModeRef.current === "live" &&
-      userPlaybackIntentRef.current === "playing"
-    ) {
-      const audio = getLeaflockMobileAudio();
-      const onStream = audio?.dataset.leaflockSrc === "stream";
-      if (onStream) {
-        player.setVolume(0);
-        player.mute();
-        setMobileAudioVolume(volumeRef.current / 100, isMutedRef.current);
-        return;
-      }
-    }
-
     const scaled = Math.round(volumeRef.current * Math.min(1, Math.max(0, gain)));
     player.setVolume(scaled);
     if (scaled > 0 && volumeRef.current > 0) {
       player.unMute();
     }
   }, [getDeckPlayer]);
-
-  /** Phone: permanent #leaflockMobileAudio is the real media element. Desktop: no-op. */
-  const playMobileBridge = useCallback(async () => {
-    if (!isMobileRef.current) return false;
-
-    const kind = mobileAudioKindForMode(listenModeRef.current);
-    const result = await playMobileAudio(kind);
-    if (!result.ok) {
-      setPlaybackError("Could not start mobile audio. Tap play again.");
-      return false;
-    }
-
-    if (listenModeRef.current === "live" && result.usingStream) {
-      // Live stream is audible — mute YouTube (sync/UI only).
-      setMobileAudioVolume(volumeRef.current / 100, isMutedRef.current);
-      playersRef.current.a?.mute();
-      playersRef.current.b?.mute();
-      playersRef.current.a?.setVolume(0);
-      playersRef.current.b?.setVolume(0);
-    } else {
-      // Silent bridge keeps Media Session alive; YouTube carries song audio when available.
-      setMobileAudioVolume(0.001, false);
-      if (listenModeRef.current === "live") {
-        applyDeckVolume(activeDeckRef.current, 1);
-      }
-    }
-
-    bindMediaSessionRef.current();
-    updateMediaSessionRef.current(true);
-    return true;
-  }, [applyDeckVolume]);
 
   const queueNextTrack = useCallback(
     (video: PlaylistVideo) => {
@@ -1069,23 +1040,7 @@ export default function LeafLockPlayer({
   }, [listenMode]);
 
   useEffect(() => {
-    isMutedRef.current = isMuted;
-    if (isMobileRef.current && userPlaybackIntentRef.current === "playing") {
-      if (listenModeRef.current === "live") {
-        setMobileAudioVolume(volumeRef.current / 100, isMuted);
-      } else {
-        setMobileAudioVolume(0.001, false);
-      }
-    }
-  }, [isMuted]);
-
-  useEffect(() => {
     volumeRef.current = volume;
-    if (isMobileRef.current && userPlaybackIntentRef.current === "playing") {
-      if (listenModeRef.current === "live") {
-        setMobileAudioVolume(volume / 100, isMutedRef.current);
-      }
-    }
     if (!blendInProgressRef.current) {
       applyDeckVolume(activeDeckRef.current, 1);
     }
@@ -1194,11 +1149,7 @@ export default function LeafLockPlayer({
           setIsPlaying(true);
           setIsConnected(true);
           setIsBuffering(false);
-          if (isMobileRef.current) {
-            void playMobileBridge();
-          } else {
-            applyDeckVolume(deck, 1);
-          }
+          applyDeckVolume(deck, 1);
           startTimePollingRef.current();
           updateMediaSessionRef.current(true);
         } catch {
@@ -1230,21 +1181,15 @@ export default function LeafLockPlayer({
 
       window.setTimeout(() => resizePlayerHosts(), 50);
     },
-    [
-      applyDeckVolume,
-      getActivePlayer,
-      playMobileBridge,
-      prefetchOnInactiveDeck,
-      resizePlayerHosts,
-      setTrackUi
-    ]
+    [applyDeckVolume, getActivePlayer, prefetchOnInactiveDeck, resizePlayerHosts, setTrackUi]
   );
 
   useEffect(() => {
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  // Mobile exit / switch app / lock: do nothing. Let #leaflockMobileAudio keep playing.
+  // Mobile hide / app switch / lock: do nothing.
+  // Do not pause, stop, destroy, or reset the original YouTube player.
 
   useEffect(() => {
     if (listenMode !== "live" || !playlistReady || !playersReady) return;
@@ -1352,49 +1297,11 @@ export default function LeafLockPlayer({
   }, [listenMode, playlistReady, refreshUpNextLabel]);
 
   useEffect(() => {
-    // Phone UA only — do not treat touch laptops as mobile (would mute YouTube incorrectly).
-    const mobile = isPhoneUserAgent();
-    isMobileRef.current = mobile;
+    const mobile =
+      /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ||
+      window.matchMedia("(pointer: coarse)").matches;
     setIsMobile(mobile);
-
-    // Ensure permanent element exists once (never destroyed by player remounts).
-    const audio = getLeaflockMobileAudio();
-    if (!audio) return;
-
-    // Only stop on real media errors — not on hide/minimize.
-    const onError = () => {
-      if (userPlaybackIntentRef.current !== "playing") return;
-      // Stream may die mid-session — fall back to silent bridge, do not hard-stop UI.
-      void playMobileAudio("silent").then((result) => {
-        if (result.ok) {
-          setMobileAudioVolume(0.001, false);
-          applyDeckVolume(activeDeckRef.current, 1);
-          updateMediaSessionRef.current(true);
-          return;
-        }
-        userPlaybackIntentRef.current = "paused";
-        pauseMobileAudio();
-        isPlayingRef.current = false;
-        setIsPlaying(false);
-        setPlaybackError("Mobile audio failed. Tap play to retry.");
-        updateMediaSessionRef.current(false);
-      });
-    };
-
-    const onPlaying = () => {
-      if (userPlaybackIntentRef.current === "playing") {
-        bindMediaSessionRef.current();
-        updateMediaSessionRef.current(true);
-      }
-    };
-
-    audio.addEventListener("error", onError);
-    audio.addEventListener("playing", onPlaying);
-    return () => {
-      audio.removeEventListener("error", onError);
-      audio.removeEventListener("playing", onPlaying);
-    };
-  }, [applyDeckVolume]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1516,7 +1423,6 @@ export default function LeafLockPlayer({
   const togglePlayRef = useRef<() => void>(() => {});
   const playPreviousRef = useRef<() => boolean>(() => false);
   const playNextRef = useRef<() => boolean>(() => false);
-  const handleUserPauseRef = useRef<() => void>(() => {});
   const bindMediaSessionRef = useRef<() => void>(() => {});
   const updateMediaSessionRef = useRef<(playing: boolean) => void>(() => {});
   useEffect(() => {
@@ -1598,12 +1504,7 @@ export default function LeafLockPlayer({
                 setIsConnected(true);
                 setIsBuffering(false);
                 setPlaybackError(null);
-                if (
-                  isMobileRef.current &&
-                  userPlaybackIntentRef.current === "playing"
-                ) {
-                  void playMobileBridge();
-                }
+                void syncMediaBridge(true);
                 bindMediaSessionRef.current();
                 updateMediaSessionRef.current(true);
                 if (deck === activeDeckRef.current) {
@@ -1622,7 +1523,7 @@ export default function LeafLockPlayer({
 
               if (event.data === YT.PlayerState.PAUSED) {
                 if (deck === activeDeckRef.current && !blendInProgressRef.current) {
-                  // Mobile audio bridge is authoritative — ignore YouTube pause noise.
+                  // Android pauses YouTube in background while user intent is still "playing".
                   if (userPlaybackIntentRef.current === "playing") {
                     return;
                   }
@@ -1780,7 +1681,6 @@ export default function LeafLockPlayer({
 
     return () => {
       cancelled = true;
-      // Do not destroy/pause #leaflockMobileAudio here — it outlives player remounts.
       stopTimePolling();
       cancelActiveCrossfade();
       playerInitRef.current = false;
@@ -1801,7 +1701,7 @@ export default function LeafLockPlayer({
     };
   }, [cancelActiveCrossfade, playlistReady, setTrackUi, syncPreviousState]);
 
-  const togglePlay = async () => {
+  const togglePlay = () => {
     const player = getActivePlayer();
     if (!player || !playersReady) {
       setPlaybackError("Player is still loading. Try again in a moment.");
@@ -1809,7 +1709,19 @@ export default function LeafLockPlayer({
     }
 
     if (isPlaying) {
-      handleUserPauseRef.current();
+      userPlaybackIntentRef.current = "paused";
+      if (listenModeRef.current === "live") {
+        persistLivePlaying(false);
+      }
+      cancelActiveCrossfade();
+      playersRef.current.a?.pauseVideo();
+      playersRef.current.b?.pauseVideo();
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+      syncPlaybackProgress();
+      stopTimePolling();
+      void syncMediaBridge(false);
+      updateMediaSessionRef.current(false);
       return;
     }
 
@@ -1819,20 +1731,19 @@ export default function LeafLockPlayer({
     }
     setPlaybackError(null);
 
-    // Phone: start permanent #leaflockMobileAudio inside the user gesture.
-    if (isMobileRef.current) {
-      const ok = await playMobileBridge();
-      if (!ok) return;
-    }
+    // Original player is authoritative. Optional silent bridge is best-effort only.
+    void syncMediaBridge(true);
     bindMediaSessionRef.current();
 
     if (listenModeRef.current === "live") {
       void fetchLiveStation()
         .then((station) => {
           applyLiveStationTrackRef.current(station, { resumePlayback: true });
+          updateMediaSessionRef.current(true);
         })
         .catch(() => {
           setPlaybackError("Could not join the live room. Try again.");
+          updateMediaSessionRef.current(false);
         });
       return;
     }
@@ -1845,10 +1756,12 @@ export default function LeafLockPlayer({
       setIsConnected(true);
       setIsBuffering(true);
       startTimePolling();
+      updateMediaSessionRef.current(true);
       return;
     }
 
     playNextTrackFromGesture();
+    updateMediaSessionRef.current(true);
   };
 
   const handlePrevious = () => {
@@ -1871,58 +1784,58 @@ export default function LeafLockPlayer({
       .catch(() => undefined);
   }, []);
 
-  const handleUserPause = useCallback(() => {
-    userPlaybackIntentRef.current = "paused";
-    pauseMobileBridge();
-    if (listenModeRef.current === "live") {
-      persistLivePlaying(false);
-    }
-    cancelActiveCrossfade();
-    playersRef.current.a?.pauseVideo();
-    playersRef.current.b?.pauseVideo();
-    isPlayingRef.current = false;
-    setIsPlaying(false);
-    syncPlaybackProgress();
-    stopTimePolling();
-    updateMediaSessionRef.current(false);
-  }, [cancelActiveCrossfade, pauseMobileBridge, stopTimePolling, syncPlaybackProgress]);
-
-  useEffect(() => {
-    handleUserPauseRef.current = handleUserPause;
-  }, [handleUserPause]);
-
   const bindMediaSession = useCallback(() => {
     if (!("mediaSession" in navigator)) return;
 
     try {
+      // Media Session only wraps the original player — never replaces it.
       navigator.mediaSession.setActionHandler("play", () => {
-        userPlaybackIntentRef.current = "playing";
-        if (listenModeRef.current === "live") {
-          persistLivePlaying(true);
-        }
-        if (isMobileRef.current) {
-          void playMobileBridge();
-        }
-        // If already marked playing in UI, just ensure audio; else full toggle path.
         if (!isPlayingRef.current) {
           togglePlayRef.current();
         } else {
+          userPlaybackIntentRef.current = "playing";
+          if (listenModeRef.current === "live") {
+            persistLivePlaying(true);
+          }
+          try {
+            getActivePlayer()?.playVideo();
+          } catch {
+            // Player may not be ready.
+          }
+          void syncMediaBridge(true);
           updateMediaSessionRef.current(true);
         }
       });
       navigator.mediaSession.setActionHandler("pause", () => {
-        // Real user control from shade / lock screen — honor pause.
-        handleUserPauseRef.current();
+        if (isPlayingRef.current) {
+          togglePlayRef.current();
+        } else {
+          userPlaybackIntentRef.current = "paused";
+          if (listenModeRef.current === "live") {
+            persistLivePlaying(false);
+          }
+          try {
+            getActivePlayer()?.pauseVideo();
+          } catch {
+            // Player may not be ready.
+          }
+          void syncMediaBridge(false);
+          updateMediaSessionRef.current(false);
+        }
       });
       navigator.mediaSession.setActionHandler("stop", () => {
         userPlaybackIntentRef.current = "stopped";
-        pauseMobileBridge();
         persistLivePlaying(false);
-        playersRef.current.a?.pauseVideo();
-        playersRef.current.b?.pauseVideo();
+        try {
+          playersRef.current.a?.pauseVideo();
+          playersRef.current.b?.pauseVideo();
+        } catch {
+          // Ignore.
+        }
         isPlayingRef.current = false;
         setIsPlaying(false);
         stopTimePolling();
+        void syncMediaBridge(false);
         updateMediaSessionRef.current(false);
       });
       navigator.mediaSession.setActionHandler("previoustrack", () => {
@@ -1957,7 +1870,7 @@ export default function LeafLockPlayer({
     } catch {
       // Some browsers reject handler registration until playback starts.
     }
-  }, [pauseMobileBridge, playMobileBridge, resyncLiveFromServer, stopTimePolling]);
+  }, [getActivePlayer, resyncLiveFromServer, stopTimePolling, syncMediaBridge]);
 
   const updateMediaSession = useCallback(
     (playing: boolean) => {
@@ -1997,10 +1910,13 @@ export default function LeafLockPlayer({
   }, [bindMediaSession, updateMediaSession]);
 
   useEffect(() => {
-    updateMediaSession(
-      userPlaybackIntentRef.current === "playing" || isPlaying
-    );
-  }, [isPlaying, nowPlaying, updateMediaSession]);
+    bindMediaSession();
+    updateMediaSession(isPlaying);
+  }, [bindMediaSession, isPlaying, nowPlaying, updateMediaSession]);
+
+  useEffect(() => {
+    void syncMediaBridge(isPlaying);
+  }, [isPlaying, syncMediaBridge]);
 
   useEffect(() => {
     setPortalReady(true);
@@ -2043,44 +1959,27 @@ export default function LeafLockPlayer({
   };
 
   const toggleMute = () => {
-    const nextMuted = !isMuted;
-    setIsMuted(nextMuted);
-
-    if (isMobileRef.current && listenModeRef.current === "live") {
-      setMobileAudioVolume(volumeRef.current / 100, nextMuted);
-      return;
-    }
-
     const player = getActivePlayer();
     if (!player || !playersReady) return;
 
-    if (nextMuted) {
-      playersRef.current.a?.mute();
-      playersRef.current.b?.mute();
-    } else {
+    if (player.isMuted()) {
       playersRef.current.a?.unMute();
       playersRef.current.b?.unMute();
+      setIsMuted(false);
+    } else {
+      playersRef.current.a?.mute();
+      playersRef.current.b?.mute();
+      setIsMuted(true);
     }
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = Math.round(parseFloat(e.target.value) * 100);
     setVolume(newVolume);
-
-    if (isMobileRef.current && listenModeRef.current === "live") {
-      const unmuted = newVolume > 0;
-      if (unmuted) setIsMuted(false);
-      setMobileAudioVolume(newVolume / 100, !unmuted || isMutedRef.current);
-    }
-
     if (!blendInProgressRef.current) {
       applyDeckVolume(activeDeckRef.current, 1);
     }
-
-    if (
-      newVolume > 0 &&
-      !(isMobileRef.current && listenModeRef.current === "live")
-    ) {
+    if (newVolume > 0) {
       playersRef.current.a?.unMute();
       playersRef.current.b?.unMute();
       setIsMuted(false);
@@ -2440,7 +2339,7 @@ export default function LeafLockPlayer({
           )}
           {isMobile ? (
             <span className="mt-2 block text-xs text-zinc-500">
-              Phone uses a permanent audio element for background play and lock-screen controls.
+              Background listening: use the bottom bar or lock-screen play/pause while you browse.
             </span>
           ) : null}
           {(isPlaying || isConnected) && !isLoadingPlaylist ? (
@@ -2449,8 +2348,9 @@ export default function LeafLockPlayer({
                 Background listening
               </summary>
               <p className="mt-2 text-xs text-zinc-500">
-                Minimize or lock your phone — audio keeps playing. Use pull-down / lock-screen
-                controls for play/pause. Close the tab to stop completely.
+                Minimize the browser or switch apps ΓÇö playback continues where your device allows.
+                Use the bottom mini player or lock-screen controls for play/pause. Close the tab to
+                stop completely.
               </p>
               <button
                 type="button"
@@ -2464,7 +2364,20 @@ export default function LeafLockPlayer({
           ) : null}
         </div>
       </div>
-      {/* Mobile audio lives in document body as #leaflockMobileAudio — permanent, never remounted here. */}
+
+      <audio
+        ref={mediaBridgeRef}
+        src="/silent.mp3"
+        loop
+        playsInline
+        preload="auto"
+        className="pointer-events-none absolute h-px w-px opacity-0"
+        aria-hidden
+        onPlay={() => {
+          bindMediaSessionRef.current();
+          updateMediaSessionRef.current(isPlayingRef.current);
+        }}
+      />
     </div>
     {miniDock}
     </>

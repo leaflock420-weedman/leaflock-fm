@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import JukeboxForm from "@/components/JukeboxForm";
-import { LEAFLOCK_MOBILE_AUDIO_ID } from "@/lib/leaflock-mobile-audio";
 
 export type ListenMode = "live" | "solo";
 
@@ -67,7 +66,9 @@ export default function FmListenMode() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          listenerId: window.localStorage.getItem("leaflock-listener-id") ?? `listener_${Date.now()}`,
+          listenerId:
+            window.localStorage.getItem("leaflock-listener-id") ??
+            `listener_${Date.now()}`,
           displayName: next === "live" ? "Live room" : "Private jukebox"
         })
       });
@@ -78,17 +79,6 @@ export default function FmListenMode() {
 
   return (
     <div className="space-y-6">
-      {/* Permanent phone media element — never remount with LeafLockPlayer key={mode}.
-          Do not destroy, do not clear src between songs, do not pause on hide. */}
-      <audio
-        id={LEAFLOCK_MOBILE_AUDIO_ID}
-        src="/silent.mp3"
-        loop
-        playsInline
-        preload="auto"
-        className="pointer-events-none absolute h-px w-px opacity-0"
-        aria-hidden
-      />
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-5">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
           How do you want to listen?
@@ -152,11 +142,7 @@ export default function FmListenMode() {
 
       <LeafLockPlayer key={mode} mode="simple" listenMode={mode} />
 
-      {mode === "live" ? (
-        <JukeboxForm sharedRoom />
-      ) : (
-        <JukeboxForm />
-      )}
+      {mode === "live" ? <JukeboxForm sharedRoom /> : <JukeboxForm />}
     </div>
   );
 }
