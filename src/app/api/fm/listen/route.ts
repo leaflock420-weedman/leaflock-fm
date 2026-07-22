@@ -5,48 +5,68 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+/**
+ * DJ420 continuous Live Radio mount (same-origin).
+ *
+ * Public Live Radio clients MUST use this single URL forever.
+ * Do not change the client audio src between songs — crossfade/mix is
+ * expected to be baked into the continuous stream upstream (AzuraCast / encoder).
+ *
+ * Priority:
+ * 1) PRIMARY_STREAM_URL / NEXT_PUBLIC_STREAM_URL / stream.leaflock.com.au
+ * 2) Continuous loop of bg-hold.wav so the element never ends (keeps session alive)
+ */
+
 const STREAM_CANDIDATES = [
-  process.env.NEXT_PUBLIC_STREAM_URL,
   process.env.PRIMARY_STREAM_URL,
+  process.env.NEXT_PUBLIC_STREAM_URL,
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
 
-async function serveHoldAudio() {
+async function serveContinuousHoldLoop(): Promise<Response> {
   const filePath = path.join(process.cwd(), "public", "bg-hold.wav");
-  try {
-    const file = await readFile(filePath);
-    return new NextResponse(file, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/wav",
-        "Content-Length": String(file.length),
-        "Cache-Control": "public, max-age=600",
-        "X-LeafLock-Audio-Source": "hold",
-        "Accept-Ranges": "bytes"
+  const file = await readFile(filePath);
+
+  // Endless chunked body so <audio> never hits "ended" when stream is offline.
+  let closed = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const chunk = new Uint8Array(file);
+      while (!closed) {
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          break;
+        }
+        // ~12s of audio at a time; small delay keeps event loop healthy.
+        await new Promise((r) => setTimeout(r, 50));
       }
-    });
-  } catch {
-    return NextResponse.json(
-      { error: "Background audio hold file missing" },
-      { status: 503 }
-    );
-  }
+    },
+    cancel() {
+      closed = true;
+    }
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "audio/wav",
+      "Cache-Control": "no-store, no-cache",
+      "X-LeafLock-Audio-Source": "hold-loop",
+      "X-LeafLock-DJ420": "continuous",
+      Connection: "keep-alive"
+    }
+  });
 }
 
-/**
- * Same-origin audio for phones.
- * Proxies the live station stream when available so Chrome can keep playing
- * after the user leaves the browser app. Falls back to a real WAV hold file
- * (not empty silence) so Media Session does not disappear.
- */
 export async function GET() {
   for (const url of STREAM_CANDIDATES) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
+      const timer = setTimeout(() => controller.abort(), 8000);
       const upstream = await fetch(url, {
         headers: {
-          "User-Agent": "LeafLockFM/1.0",
+          "User-Agent": "LeafLockFM-DJ420/1.0",
           Accept: "audio/*,application/octet-stream,*/*",
           "Icy-MetaData": "1"
         },
@@ -62,31 +82,46 @@ export async function GET() {
       const lengthHeader = upstream.headers.get("content-length");
       const length = lengthHeader ? Number(lengthHeader) : null;
 
-      // Reject HTML error pages and tiny non-stream payloads.
       if (type.includes("text/html") || type.includes("application/json")) continue;
-      if (length !== null && length > 0 && length < 2048 && !type.includes("mpeg") && !type.includes("ogg")) {
+      if (
+        length !== null &&
+        length > 0 &&
+        length < 4096 &&
+        !type.includes("mpeg") &&
+        !type.includes("ogg") &&
+        !type.includes("aac")
+      ) {
         continue;
       }
 
       const headers = new Headers();
       headers.set(
         "Content-Type",
-        type.includes("audio") || type.includes("mpeg") || type.includes("ogg")
+        type.includes("audio") || type.includes("mpeg") || type.includes("ogg") || type.includes("aac")
           ? type
           : "audio/mpeg"
       );
       headers.set("Cache-Control", "no-store, no-cache");
       headers.set("X-LeafLock-Audio-Source", "stream");
+      headers.set("X-LeafLock-DJ420", "continuous");
       headers.set("Connection", "keep-alive");
 
-      return new NextResponse(upstream.body, {
-        status: 200,
-        headers
-      });
+      // Pass through icy metadata interval when present (for future clients).
+      const icy = upstream.headers.get("icy-metaint");
+      if (icy) headers.set("icy-metaint", icy);
+
+      return new Response(upstream.body, { status: 200, headers });
     } catch {
-      // Try next candidate.
+      // try next
     }
   }
 
-  return serveHoldAudio();
+  try {
+    return await serveContinuousHoldLoop();
+  } catch {
+    return NextResponse.json(
+      { error: "DJ420 continuous stream unavailable" },
+      { status: 503 }
+    );
+  }
 }

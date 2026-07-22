@@ -82,10 +82,9 @@ export default function FmListenMode() {
     <div className="space-y-6">
       {/* Permanent phone media host — outside LeafLockPlayer key={mode} so it never remounts.
           Holds Media Session / lock-screen while YouTube is the music engine. */}
+      {/* Permanent Live Radio element — src set once to /api/fm/listen by the player. */}
       <audio
         id={LEAFLOCK_MOBILE_AUDIO_ID}
-        src="/bg-hold.wav"
-        loop
         playsInline
         preload="auto"
         className="pointer-events-none absolute h-px w-px opacity-0"
