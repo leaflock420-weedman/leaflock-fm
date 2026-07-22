@@ -194,6 +194,9 @@ async function fetchLiveStation(): Promise<PublicStationPayload> {
   return (await fallback.json()) as PublicStationPayload;
 }
 
+/** YouTube requires a usable player size; 2x2 embeds often fail with onError. */
+const YT_MIN_SIZE = 200;
+
 function createPlayerVars(playlistId?: string | null): Record<string, string | number> {
   const playerVars: Record<string, string | number> = {
     autoplay: 0,
@@ -212,9 +215,8 @@ function createPlayerVars(playlistId?: string | null): Record<string, string | n
     playerVars.list = playlistId;
   }
 
-  if (typeof window !== "undefined") {
-    playerVars.origin = window.location.origin;
-  }
+  // Do not set origin here — wrong/mismatched origin breaks postMessage control
+  // on mobile and shows "target origin does not match" failures.
 
   return playerVars;
 }
@@ -1048,17 +1050,24 @@ export default function LeafLockPlayer({
 
   const resizePlayerHosts = useCallback(() => {
     const shell = videoShellRef.current;
-    const fullWidth = showVideo && shell && shell.clientWidth > 0 ? shell.clientWidth : 2;
-    const fullHeight = showVideo && shell && shell.clientHeight > 0 ? shell.clientHeight : 2;
+    const fullWidth =
+      showVideo && shell && shell.clientWidth > 0 ? shell.clientWidth : YT_MIN_SIZE;
+    const fullHeight =
+      showVideo && shell && shell.clientHeight > 0 ? shell.clientHeight : YT_MIN_SIZE;
 
     (["a", "b"] as DeckId[]).forEach((deck) => {
       const player = playersRef.current[deck];
       if (!player) return;
 
       const isActive = deck === activeDeckRef.current;
-      const width = showVideo && isActive ? fullWidth : 2;
-      const height = showVideo && isActive ? fullHeight : 2;
-      player.setSize(width, height);
+      // Keep non-visible decks at minimum legal size so embeds stay valid.
+      const width = showVideo && isActive ? fullWidth : YT_MIN_SIZE;
+      const height = showVideo && isActive ? fullHeight : YT_MIN_SIZE;
+      try {
+        player.setSize(width, height);
+      } catch {
+        // Player may not support setSize yet.
+      }
     });
   }, [showVideo]);
 
@@ -1131,18 +1140,26 @@ export default function LeafLockPlayer({
       setTrackUi(video, track.artist ?? "LeafLock FM");
 
       const resumeAt = Math.max(0, station.currentOffsetSeconds ?? station.offsetSeconds);
+      const shouldPlay =
+        Boolean(options?.resumePlayback) ||
+        userPlaybackIntentRef.current === "playing";
+
       const startPlayback = () => {
         try {
-          if (resumeAt > 0.5) {
-            player.seekTo(resumeAt, true);
-          }
-          if (options?.initialCue || userPlaybackIntentRef.current !== "playing") {
+          if (!shouldPlay || options?.initialCue) {
             isPlayingRef.current = false;
             setIsPlaying(false);
             setIsConnected(true);
             setIsBuffering(false);
             updateMediaSessionRef.current(false);
             return;
+          }
+          if (resumeAt > 0.5) {
+            try {
+              player.seekTo(resumeAt, true);
+            } catch {
+              // ignore
+            }
           }
           player.playVideo();
           isPlayingRef.current = true;
@@ -1166,14 +1183,37 @@ export default function LeafLockPlayer({
       }
 
       if (shouldReload) {
-        if (options?.initialCue) {
-          player.cueVideoById(track.videoId);
-          deckVideoIdRef.current[deck] = track.videoId;
-          window.setTimeout(startPlayback, 120);
+        deckVideoIdRef.current[deck] = track.videoId;
+        // Only load+play when the user wants audio. Otherwise cue only —
+        // loadVideoById while idle causes perpetual BUFFERING and disables Play.
+        if (shouldPlay && !options?.initialCue) {
+          try {
+            (
+              player as YTPlayer & {
+                loadVideoById: (opts: string | { videoId: string; startSeconds?: number }) => void;
+              }
+            ).loadVideoById({
+              videoId: track.videoId,
+              startSeconds: resumeAt
+            });
+          } catch {
+            player.loadVideoById(track.videoId);
+          }
+          window.setTimeout(startPlayback, 400);
         } else {
-          player.loadVideoById(track.videoId);
-          deckVideoIdRef.current[deck] = track.videoId;
-          window.setTimeout(startPlayback, 500);
+          try {
+            (
+              player as YTPlayer & {
+                cueVideoById: (opts: string | { videoId: string; startSeconds?: number }) => void;
+              }
+            ).cueVideoById({
+              videoId: track.videoId,
+              startSeconds: resumeAt
+            });
+          } catch {
+            player.cueVideoById(track.videoId);
+          }
+          window.setTimeout(startPlayback, 120);
         }
       } else {
         startPlayback();
@@ -1434,8 +1474,8 @@ export default function LeafLockPlayer({
     async function initDeck(deck: DeckId, host: HTMLDivElement, YT: YTNamespace) {
       return new Promise<YTPlayer>((resolve, reject) => {
         const player = new YT.Player(host, {
-          height: "2",
-          width: "2",
+          height: String(YT_MIN_SIZE),
+          width: String(YT_MIN_SIZE),
           playerVars: createPlayerVars(
             listenModeRef.current === "live" ? null : playlistIdRef.current
           ),
@@ -1570,11 +1610,10 @@ export default function LeafLockPlayer({
                 }
               }
             },
-            onError: (event) => {
+            onError: () => {
               if (deck !== activeDeckRef.current) return;
               setIsBuffering(false);
-              setIsPlaying(false);
-              setIsConnected(false);
+              // Keep connection UI usable — do not lock the Play button.
               if (listenModeRef.current === "live") {
                 setPlaybackError("This track could not be played. Re-syncing live room...");
                 void fetchLiveStation()
@@ -1585,11 +1624,16 @@ export default function LeafLockPlayer({
                     });
                   })
                   .catch(() => undefined);
+                window.setTimeout(() => {
+                  setPlaybackError(null);
+                }, 4000);
                 return;
               }
               setPlaybackError("This track could not be played. Skipping to another.");
               if (userPlaybackIntentRef.current === "playing") {
                 playNextTrackAutoRef.current();
+              } else {
+                window.setTimeout(() => setPlaybackError(null), 4000);
               }
             }
           }
@@ -1604,10 +1648,21 @@ export default function LeafLockPlayer({
     async function initPlayers() {
       try {
         const YT = await loadYouTubeApi();
-        const hostA = playerHostARef.current;
-        const hostB = playerHostBRef.current;
+
+        // Wait for deck host nodes (can miss first paint / strict-mode remount).
+        let hostA = playerHostARef.current;
+        let hostB = playerHostBRef.current;
+        for (let i = 0; i < 40 && (!hostA || !hostB); i += 1) {
+          await new Promise((r) => window.setTimeout(r, 50));
+          hostA = playerHostARef.current;
+          hostB = playerHostBRef.current;
+          if (cancelled) return;
+        }
 
         if (cancelled || playerInitRef.current || !hostA || !hostB) {
+          if (!cancelled && !playerInitRef.current && (!hostA || !hostB)) {
+            setPlaybackError("Player failed to mount. Refresh the page.");
+          }
           return;
         }
 
@@ -1714,10 +1769,15 @@ export default function LeafLockPlayer({
         persistLivePlaying(false);
       }
       cancelActiveCrossfade();
-      playersRef.current.a?.pauseVideo();
-      playersRef.current.b?.pauseVideo();
+      try {
+        playersRef.current.a?.pauseVideo();
+        playersRef.current.b?.pauseVideo();
+      } catch {
+        // ignore
+      }
       isPlayingRef.current = false;
       setIsPlaying(false);
+      setIsBuffering(false);
       syncPlaybackProgress();
       stopTimePolling();
       void syncMediaBridge(false);
@@ -1730,18 +1790,33 @@ export default function LeafLockPlayer({
       persistLivePlaying(true);
     }
     setPlaybackError(null);
+    setIsBuffering(true);
 
-    // Original player is authoritative. Optional silent bridge is best-effort only.
+    // Original YouTube player is authoritative. Silent bridge is best-effort only.
     void syncMediaBridge(true);
     bindMediaSessionRef.current();
 
     if (listenModeRef.current === "live") {
       void fetchLiveStation()
         .then((station) => {
-          applyLiveStationTrackRef.current(station, { resumePlayback: true });
+          applyLiveStationTrackRef.current(station, {
+            forceReload: true,
+            resumePlayback: true
+          });
+          // Immediate play attempt in case station apply is delayed.
+          try {
+            player.playVideo();
+            applyDeckVolume(activeDeckRef.current, 1);
+          } catch {
+            // ignore
+          }
+          isPlayingRef.current = true;
+          setIsPlaying(true);
+          setIsConnected(true);
           updateMediaSessionRef.current(true);
         })
         .catch(() => {
+          setIsBuffering(false);
           setPlaybackError("Could not join the live room. Try again.");
           updateMediaSessionRef.current(false);
         });
@@ -1749,7 +1824,11 @@ export default function LeafLockPlayer({
     }
 
     if (currentVideoIdRef.current) {
-      player.playVideo();
+      try {
+        player.playVideo();
+      } catch {
+        // ignore
+      }
       applyDeckVolume(activeDeckRef.current, 1);
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -2041,7 +2120,7 @@ export default function LeafLockPlayer({
                 <button
                   type="button"
                   onClick={handlePrevious}
-                  disabled={listenMode === "live" || isBuffering || !canGoPrevious}
+                  disabled={listenMode === "live" || !playersReady || !canGoPrevious}
                   className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900 text-zinc-200 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:opacity-35 touch-manipulation"
                   aria-label="Previous track"
                 >
@@ -2050,11 +2129,11 @@ export default function LeafLockPlayer({
                 <button
                   type="button"
                   onClick={togglePlay}
-                  disabled={isBuffering && !isBlending}
+                  disabled={!playersReady}
                   className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500 text-zinc-950 shadow-lg transition-all hover:bg-emerald-400 active:scale-[0.98] disabled:opacity-60 touch-manipulation"
                   aria-label={isPlaying ? "Pause" : "Play"}
                 >
-                  {isBuffering && !isBlending ? (
+                  {!playersReady ? (
                     <Loader2 className="h-6 w-6 animate-spin" />
                   ) : isPlaying ? (
                     <Pause className="h-6 w-6" />
@@ -2180,7 +2259,8 @@ export default function LeafLockPlayer({
         className={
           showVideo
             ? "relative mb-5 aspect-video w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black sm:mb-6"
-            : "pointer-events-none absolute left-0 top-0 h-[2px] w-[2px] overflow-hidden opacity-[0.01]"
+            : // Off-screen but large enough for YouTube (min ~200px) so embeds do not error.
+              "pointer-events-none fixed left-[-10000px] top-0 h-[220px] w-[220px] overflow-hidden opacity-0"
         }
         aria-hidden={!showVideo}
       >
@@ -2191,7 +2271,7 @@ export default function LeafLockPlayer({
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "a" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
-              : "h-[2px] w-[2px]"
+              : "h-full w-full"
           }
         />
         <div
@@ -2201,7 +2281,7 @@ export default function LeafLockPlayer({
               ? `absolute inset-0 h-full w-full ${
                   activeDeck === "b" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                 }`
-              : "h-[2px] w-[2px]"
+              : "h-full w-full"
           }
         />
       </div>
@@ -2264,7 +2344,7 @@ export default function LeafLockPlayer({
           <button
             type="button"
             onClick={handlePrevious}
-            disabled={listenMode === "live" || isLoadingPlaylist || isBuffering || !canGoPrevious}
+            disabled={listenMode === "live" || isLoadingPlaylist || !playersReady || !canGoPrevious}
             className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Previous track"
           >
@@ -2274,11 +2354,11 @@ export default function LeafLockPlayer({
           <button
             type="button"
             onClick={togglePlay}
-            disabled={isLoadingPlaylist || (isBuffering && !isBlending)}
+            disabled={isLoadingPlaylist || !playersReady}
             className="flex h-[4.5rem] w-[4.5rem] shrink-0 items-center justify-center rounded-full bg-white text-zinc-950 shadow-xl transition-all hover:bg-emerald-400 active:scale-[0.985] disabled:cursor-wait disabled:opacity-60 sm:h-20 sm:w-20 md:h-24 md:w-24 touch-manipulation"
             aria-label={isPlaying ? "Pause playlist" : "Play playlist"}
           >
-            {isLoadingPlaylist || (isBuffering && !isBlending) ? (
+            {isLoadingPlaylist || !playersReady ? (
               <Loader2 className="w-9 h-9 animate-spin" />
             ) : isPlaying ? (
               <Pause className="w-9 h-9" />
@@ -2290,7 +2370,7 @@ export default function LeafLockPlayer({
           <button
             type="button"
             onClick={handleNext}
-            disabled={isLoadingPlaylist || isBlending || listenMode === "live"}
+            disabled={isLoadingPlaylist || !playersReady || isBlending || listenMode === "live"}
             className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 transition-colors hover:border-emerald-500 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:h-14 sm:w-14 touch-manipulation"
             aria-label="Next track"
           >
