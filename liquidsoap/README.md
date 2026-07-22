@@ -1,10 +1,13 @@
 # DJ420 Liquidsoap (continuous Live Radio)
 
-Crossfades run **once on the server**. Phones only play:
+Crossfades run **once on the server**. Phones play the permanent element:
 
-`https://stream.leaflock.com.au/live.mp3`
+`https://fm.leaflock.com.au/live.mp3`
 
-via the permanent `<audio id="leaflockMobileAudio">` element (proxied same-origin as `/api/fm/listen`).
+(same-origin on the main site — no `stream.` DNS required for the app).
+
+Optional: point `DJ420_UPSTREAM_URL` at your Icecast/Liquidsoap encoder
+(e.g. `https://stream.leaflock.com.au/live.mp3`) so `/live.mp3` proxies real radio.
 
 ## Quick start (Docker)
 

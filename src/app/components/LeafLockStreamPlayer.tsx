@@ -5,10 +5,10 @@ import LoveButton from "@/components/LoveButton";
 import { Loader2, Pause, Play, Radio, Volume2, VolumeX } from "lucide-react";
 
 const streamUrl =
-  process.env.NEXT_PUBLIC_STREAM_URL ?? "https://stream.leaflock.com.au/live.mp3";
+  process.env.NEXT_PUBLIC_STREAM_URL ?? "https://fm.leaflock.com.au/live.mp3";
 const fallbackStreamUrl =
   process.env.NEXT_PUBLIC_STREAM_FALLBACK_URL ??
-  "https://stream.leaflock.com.au/live.mp3";
+  "https://fm.leaflock.com.au/live.mp3";
 const nowPlayingUrl =
   process.env.NEXT_PUBLIC_NOW_PLAYING_URL ?? "/api/radio/now-playing";
 

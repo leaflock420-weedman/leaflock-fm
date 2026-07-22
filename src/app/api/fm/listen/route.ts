@@ -6,23 +6,45 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /**
- * Same-origin Live Radio mount for phones.
+ * Live Radio continuous audio for:
+ *   https://fm.leaflock.com.au/live.mp3
+ *   https://fm.leaflock.com.au/api/fm/listen
  *
- * Prefer DJ420 Liquidsoap → Icecast:
- *   https://stream.leaflock.com.au/live.mp3
- *
- * If that mount is down, serve a single finite hold file (client loops it).
- * Never stream repeated WAV headers — that corrupts playback after the first cycle.
+ * Prefer external DJ420 Liquidsoap/Icecast if configured and reachable.
+ * Never proxy ourselves (would loop). Fallback = finite hold file (client loops).
  */
 
-const DEFAULT_LIVE_MOUNT = "https://stream.leaflock.com.au/live.mp3";
-
-const STREAM_CANDIDATES = [
+const EXTERNAL_STREAM_CANDIDATES = [
   process.env.PRIMARY_STREAM_URL,
+  process.env.DJ420_UPSTREAM_URL,
+  // Only use NEXT_PUBLIC_STREAM_URL if it is NOT this app's own mount
   process.env.NEXT_PUBLIC_STREAM_URL,
-  DEFAULT_LIVE_MOUNT,
+  "https://stream.leaflock.com.au/live.mp3",
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
+
+function isSelfUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host === "fm.leaflock.com.au" || host === "localhost" || host === "127.0.0.1") {
+      return (
+        u.pathname === "/live.mp3" ||
+        u.pathname === "/live.pm3" ||
+        u.pathname === "/api/fm/listen" ||
+        u.pathname.startsWith("/api/fm/listen")
+      );
+    }
+  } catch {
+    // relative paths
+    return (
+      url.startsWith("/live.mp3") ||
+      url.startsWith("/live.pm3") ||
+      url.startsWith("/api/fm/listen")
+    );
+  }
+  return false;
+}
 
 async function serveHoldFile(): Promise<Response> {
   const filePath = path.join(process.cwd(), "public", "bg-hold.wav");
@@ -34,6 +56,7 @@ async function serveHoldFile(): Promise<Response> {
       "Content-Length": String(file.length),
       "Cache-Control": "public, max-age=60",
       "Accept-Ranges": "bytes",
+      "Access-Control-Allow-Origin": "*",
       "X-LeafLock-Audio-Source": "hold",
       "X-LeafLock-DJ420": "continuous"
     }
@@ -41,7 +64,9 @@ async function serveHoldFile(): Promise<Response> {
 }
 
 export async function GET() {
-  for (const url of STREAM_CANDIDATES) {
+  for (const url of EXTERNAL_STREAM_CANDIDATES) {
+    if (isSelfUrl(url)) continue;
+
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
@@ -64,7 +89,6 @@ export async function GET() {
       const length = lengthHeader ? Number(lengthHeader) : null;
 
       if (type.includes("text/html") || type.includes("application/json")) continue;
-      // Reject tiny junk payloads that are not real streams.
       if (length !== null && Number.isFinite(length) && length > 0 && length < 8192) {
         if (!type.includes("mpeg") && !type.includes("ogg") && !type.includes("aac")) {
           continue;
@@ -79,6 +103,7 @@ export async function GET() {
           : "audio/mpeg"
       );
       headers.set("Cache-Control", "no-store, no-cache");
+      headers.set("Access-Control-Allow-Origin", "*");
       headers.set("X-LeafLock-Audio-Source", "stream");
       headers.set("X-LeafLock-DJ420", "continuous");
       headers.set("Connection", "keep-alive");
@@ -87,7 +112,7 @@ export async function GET() {
 
       return new Response(upstream.body, { status: 200, headers });
     } catch {
-      // try next candidate
+      // try next
     }
   }
 
@@ -96,8 +121,9 @@ export async function GET() {
   } catch {
     return NextResponse.json(
       {
-        error: "DJ420 stream offline",
-        hint: "Point stream.leaflock.com.au DNS at Icecast and run liquidsoap/dj420.liq → /live.mp3"
+        error: "Live mount unavailable",
+        mount: "https://fm.leaflock.com.au/live.mp3",
+        hint: "Set DJ420_UPSTREAM_URL or PRIMARY_STREAM_URL to a real Icecast/Liquidsoap MP3 URL"
       },
       { status: 503 }
     );

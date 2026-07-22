@@ -22,9 +22,9 @@ export async function getHomeData() {
     station: {
       name: "LeafLock Radio",
       primaryStreamUrl:
-        process.env.PRIMARY_STREAM_URL || "https://stream.leaflock.com.au/live.mp3",
+        process.env.PRIMARY_STREAM_URL || "https://fm.leaflock.com.au/live.mp3",
       fallbackStreamUrl:
-        process.env.FALLBACK_STREAM_URL || "https://stream.leaflock.com.au/live.mp3",
+        process.env.FALLBACK_STREAM_URL || "https://fm.leaflock.com.au/live.mp3",
       timezone: "Australia/Brisbane",
       featuredEpisode: episodes.find((episode) => episode.state === PublishingState.SCHEDULED) || episodes[0] || null
     }

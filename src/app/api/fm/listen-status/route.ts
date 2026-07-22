@@ -3,19 +3,36 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const DEFAULT_LIVE_MOUNT = "https://stream.leaflock.com.au/live.mp3";
-
-const STREAM_CANDIDATES = [
+const EXTERNAL_STREAM_CANDIDATES = [
   process.env.PRIMARY_STREAM_URL,
+  process.env.DJ420_UPSTREAM_URL,
   process.env.NEXT_PUBLIC_STREAM_URL,
-  DEFAULT_LIVE_MOUNT,
+  "https://stream.leaflock.com.au/live.mp3",
   "https://stream.leaflock.com.au/main"
 ].filter((value): value is string => Boolean(value && value.trim()));
+
+function isSelfUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host === "fm.leaflock.com.au" || host === "localhost" || host === "127.0.0.1") {
+      return (
+        u.pathname === "/live.mp3" ||
+        u.pathname === "/live.pm3" ||
+        u.pathname.startsWith("/api/fm/listen")
+      );
+    }
+  } catch {
+    return url.startsWith("/live") || url.startsWith("/api/fm/listen");
+  }
+  return false;
+}
 
 export async function GET() {
   const tried: string[] = [];
 
-  for (const url of STREAM_CANDIDATES) {
+  for (const url of EXTERNAL_STREAM_CANDIDATES) {
+    if (isSelfUrl(url)) continue;
     tried.push(url);
     try {
       const controller = new AbortController();
@@ -50,7 +67,7 @@ export async function GET() {
         return NextResponse.json({
           ok: true,
           source: "stream",
-          mount: "/api/fm/listen",
+          mount: "https://fm.leaflock.com.au/live.mp3",
           upstream: url,
           dj420: "continuous"
         });
@@ -63,10 +80,9 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     source: "hold",
-    mount: "/api/fm/listen",
-    dj420: "continuous",
+    mount: "https://fm.leaflock.com.au/live.mp3",
     tried,
     note:
-      "stream.leaflock.com.au/live.mp3 is unreachable. Live room uses YouTube for music until Liquidsoap/Icecast is online. DNS for stream.leaflock.com.au must point at your Icecast host."
+      "No external Icecast/Liquidsoap upstream. /live.mp3 is online on this host but serving hold until DJ420_UPSTREAM_URL or PRIMARY_STREAM_URL is set. Live room uses YouTube for music until then."
   });
 }
