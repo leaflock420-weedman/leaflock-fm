@@ -15,23 +15,10 @@ import {
   pickVibeMatchFromPlaylist,
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
+import { ensureWritableDataDir, resolveWritableDataDir } from "@/lib/data-dir";
 
-// Prefer a persistent disk path on Render (attach a disk at /var/data).
-// Without this, every deploy resets the live room timeline ("it's been reset").
-function resolveDataDir() {
-  if (process.env.STATION_DATA_DIR) return process.env.STATION_DATA_DIR;
-  try {
-    // Render persistent disk convention
-    const persistent = "/var/data/leaflock";
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fsSync = require("fs") as typeof import("fs");
-    if (fsSync.existsSync("/var/data")) return persistent;
-  } catch {
-    // ignore
-  }
-  return path.join(process.cwd(), "data");
-}
-const DATA_DIR = resolveDataDir();
+// Writable data dir (falls back to cwd/data if /var/data is not mounted).
+const DATA_DIR = resolveWritableDataDir();
 const STATION_PATH = path.join(DATA_DIR, "station-state.json");
 
 export type StationTrack = {
@@ -138,7 +125,9 @@ function formatInjectCredit(inject: PlayerInject): string | null {
 }
 
 async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  await ensureWritableDataDir();
+  // If resolve picked cwd/data after a bad env path, still ensure absolute STATION_PATH parent.
+  await fs.mkdir(path.dirname(STATION_PATH), { recursive: true }).catch(() => undefined);
 }
 
 async function loadStationState(): Promise<StationState | null> {

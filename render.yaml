@@ -16,10 +16,13 @@ services:
         value: production
       - key: HOSTNAME
         value: 0.0.0.0
-      - key: DATABASE_DIR
-        value: /var/data/leaflock
-      - key: STATION_DATA_DIR
-        value: /var/data/leaflock
+      # Only set these when a Render disk is mounted at /var/data.
+      # Forcing /var/data without a disk causes: EACCES mkdir '/var/data'
+      # and kills the instrumentation hook on boot.
+      # - key: DATABASE_DIR
+      #   value: /var/data/leaflock
+      # - key: STATION_DATA_DIR
+      #   value: /var/data/leaflock
       - key: DATABASE_URL
         value: postgresql://build:build@localhost:5432/build
       - key: APP_URL
