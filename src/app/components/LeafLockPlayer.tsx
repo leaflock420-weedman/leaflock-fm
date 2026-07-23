@@ -1968,9 +1968,9 @@ export default function LeafLockPlayer({
 
   const togglePlay = () => {
     // —— LIVE RADIO ——
-    // Real background music = /live.mp3 only when status.source === "stream"
-    // (DJ420 track audio or Icecast). Hold pad is NEVER used as the song.
-    // If stream is hold/offline → YouTube for music (foreground).
+    // YouTube is the default music path (works reliably).
+    // /live.mp3 is used only when it is a REAL stream (not the soft hold).
+    // Critical: start YouTube inside the SAME user-gesture stack (no await first).
     if (listenModeRef.current === "live") {
       if (isPlaying) {
         userPlaybackIntentRef.current = "paused";
@@ -1995,61 +1995,69 @@ export default function LeafLockPlayer({
       persistLivePlaying(true);
       setPlaybackError(null);
       setIsBuffering(true);
+      liveUsesStreamRef.current = false;
 
       const vol = Math.max(0.55, volumeRef.current / 100);
+
+      // 1) User-gesture sync: kick YouTube + silent media host immediately.
+      startLiveRadioAudio(0.001);
+      setLiveRadioVolume(0.001, false);
+      try {
+        const player = getActivePlayer();
+        if (player && playersReady) {
+          player.unMute();
+          player.setVolume(Math.max(1, volumeRef.current));
+          player.playVideo();
+        }
+      } catch {
+        // Player may still be loading — async path will retry.
+      }
       bindMediaSessionRef.current();
       isPlayingRef.current = true;
       setIsPlaying(true);
       setIsConnected(true);
       updateMediaSessionRef.current(true);
+      startTimePolling();
 
+      // 2) Async: join station timeline + optional real /live.mp3 stream upgrade.
       void (async () => {
         try {
-          const [station, mode] = await Promise.all([
-            fetchLiveStation(),
-            probeLiveAudioMode()
-          ]);
+          const station = await fetchLiveStation();
           if (userPlaybackIntentRef.current !== "playing") return;
 
-          if (mode === "stream") {
-            // Real continuous track audio on /live.mp3 → survives leaving Chrome.
-            liveUsesStreamRef.current = true;
-            startLiveRadioAudio(vol);
-            muteYouTubeDecks();
-            applyLiveStationTrackRef.current(station, {
-              forceReload: true,
-              resumePlayback: false,
-              initialCue: true
-            });
-            setLiveRadioVolume(vol, false);
-            void resumeLiveRadioAudio(vol);
+          // Default: YouTube carries the live room songs.
+          await playLiveYouTube(station);
+
+          // Upgrade only if /live.mp3 is real station audio (not hold).
+          const mode = await probeLiveAudioMode();
+          if (userPlaybackIntentRef.current !== "playing") return;
+          if (mode !== "stream") {
             setIsBuffering(false);
-            updateMediaSessionRef.current(true);
-            startTimePollingRef.current();
             return;
           }
 
-          // /live.mp3 is only hold (soft pad) — do NOT play it as music.
-          // YouTube plays the songs. Soft host stays inaudible for Media Session.
-          liveUsesStreamRef.current = false;
-          startLiveRadioAudio(0.001);
-          setLiveRadioVolume(0.001, false);
-          await playLiveYouTube(station);
-        } catch {
-          liveUsesStreamRef.current = false;
+          liveUsesStreamRef.current = true;
+          startLiveRadioAudio(vol);
+          setLiveRadioVolume(vol, false);
+          void resumeLiveRadioAudio(vol);
+          muteYouTubeDecks();
           try {
-            const station = await fetchLiveStation();
-            if (userPlaybackIntentRef.current === "playing") {
-              startLiveRadioAudio(0.001);
-              setLiveRadioVolume(0.001, false);
-              await playLiveYouTube(station);
-            }
+            playersRef.current.a?.pauseVideo();
+            playersRef.current.b?.pauseVideo();
           } catch {
-            setIsBuffering(false);
-            setPlaybackError("Could not start live audio. Try again.");
-            isPlayingRef.current = false;
-            setIsPlaying(false);
-            pauseLiveRadioAudio();
+            // ignore
+          }
+          setIsBuffering(false);
+          updateMediaSessionRef.current(true);
+        } catch {
+          setIsBuffering(false);
+          // Keep trying YouTube if station fetch failed once.
+          try {
+            const player = getActivePlayer();
+            player?.playVideo();
+            unmuteYouTubeDecks();
+          } catch {
+            setPlaybackError("Could not join the live room. Try again.");
           }
         }
       })();

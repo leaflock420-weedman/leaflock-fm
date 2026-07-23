@@ -16,7 +16,22 @@ import {
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+// Prefer a persistent disk path on Render (attach a disk at /var/data).
+// Without this, every deploy resets the live room timeline ("it's been reset").
+function resolveDataDir() {
+  if (process.env.STATION_DATA_DIR) return process.env.STATION_DATA_DIR;
+  try {
+    // Render persistent disk convention
+    const persistent = "/var/data/leaflock";
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsSync = require("fs") as typeof import("fs");
+    if (fsSync.existsSync("/var/data")) return persistent;
+  } catch {
+    // ignore
+  }
+  return path.join(process.cwd(), "data");
+}
+const DATA_DIR = resolveDataDir();
 const STATION_PATH = path.join(DATA_DIR, "station-state.json");
 
 export type StationTrack = {
