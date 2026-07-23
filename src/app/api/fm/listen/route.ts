@@ -1,19 +1,22 @@
+import { proxyCurrentTrackResponse } from "@/lib/dj420-audio-source";
 import { readFile } from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 /**
- * https://fm.leaflock.com.au/live.mp3
+ * LeafLock Locked In Radio — permanent mount:
+ *   https://fm.leaflock.com.au/live.mp3
  *
- * LIGHTWEIGHT only — never spawn yt-dlp (that OOM-killed Render starter).
+ * This is the audio that continues after you leave Chrome (HTML <audio>).
  *
- * - If DJ420_UPSTREAM_URL points at a real Icecast/Liquidsoap mount, proxy it.
- * - Otherwise serve tiny silent.mp3 (Media Session host only).
- *
- * Live room music comes from YouTube unless a real upstream stream is configured.
+ * Priority:
+ * 1) DJ420_UPSTREAM_URL / PRIMARY_STREAM_URL — real Icecast/Liquidsoap (best)
+ * 2) Current live-station track audio (yt-dlp URL resolve + stream proxy; cached, single-flight)
+ * 3) silent.mp3 last resort (not music)
  */
 
 function isSelfUrl(url: string): boolean {
@@ -38,31 +41,20 @@ function isSelfUrl(url: string): boolean {
   return false;
 }
 
-async function serveSilent(): Promise<Response> {
-  const file = await readFile(path.join(process.cwd(), "public", "silent.mp3"));
-  return new NextResponse(file, {
-    status: 200,
-    headers: {
-      "Content-Type": "audio/mpeg",
-      "Content-Length": String(file.length),
-      "Cache-Control": "public, max-age=300",
-      "Access-Control-Allow-Origin": "*",
-      "X-LeafLock-Audio-Source": "silent",
-      "X-LeafLock-Mount": "https://fm.leaflock.com.au/live.mp3"
-    }
-  });
+function externalCandidates(): string[] {
+  return [process.env.DJ420_UPSTREAM_URL, process.env.PRIMARY_STREAM_URL]
+    .map((v) => v?.trim())
+    .filter((v): v is string => Boolean(v && !isSelfUrl(v)));
 }
 
-export async function GET() {
-  // Only proxy a real external encoder — never self, never yt-dlp.
-  const upstreamUrl = process.env.DJ420_UPSTREAM_URL?.trim();
-  if (upstreamUrl && !isSelfUrl(upstreamUrl)) {
+async function tryExternalStream(): Promise<Response | null> {
+  for (const url of externalCandidates()) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 4000);
-      const upstream = await fetch(upstreamUrl, {
+      const upstream = await fetch(url, {
         headers: {
-          "User-Agent": "LeafLockFM/1.0",
+          "User-Agent": "LeafLockFM/1.0 LockedInRadio",
           Accept: "audio/mpeg,audio/*,*/*",
           "Icy-MetaData": "1"
         },
@@ -71,26 +63,71 @@ export async function GET() {
       });
       clearTimeout(timer);
 
-      if (upstream.ok && upstream.body) {
-        const type = (upstream.headers.get("content-type") || "").toLowerCase();
-        if (!type.includes("text/html") && !type.includes("json")) {
-          const headers = new Headers();
-          headers.set("Content-Type", type.includes("audio") ? type : "audio/mpeg");
-          headers.set("Cache-Control", "no-store");
-          headers.set("Access-Control-Allow-Origin", "*");
-          headers.set("X-LeafLock-Audio-Source", "stream");
-          headers.set("X-LeafLock-Mount", "https://fm.leaflock.com.au/live.mp3");
-          return new Response(upstream.body, { status: 200, headers });
-        }
-      }
+      if (!upstream.ok || !upstream.body) continue;
+      const type = (upstream.headers.get("content-type") || "").toLowerCase();
+      if (type.includes("text/html") || type.includes("json")) continue;
+
+      const headers = new Headers();
+      headers.set("Content-Type", type.includes("audio") ? type : "audio/mpeg");
+      headers.set("Cache-Control", "no-store");
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("X-LeafLock-Audio-Source", "stream");
+      headers.set("X-LeafLock-Station", "LeafLock Locked In Radio");
+      headers.set("X-LeafLock-Mount", "https://fm.leaflock.com.au/live.mp3");
+      return new Response(upstream.body, { status: 200, headers });
     } catch {
-      // fall through to silent
+      // try next
+    }
+  }
+  return null;
+}
+
+async function serveSilent(): Promise<Response> {
+  const file = await readFile(path.join(process.cwd(), "public", "silent.mp3"));
+  return new NextResponse(file, {
+    status: 200,
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Content-Length": String(file.length),
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+      "X-LeafLock-Audio-Source": "silent",
+      "X-LeafLock-Station": "LeafLock Locked In Radio",
+      "X-LeafLock-Mount": "https://fm.leaflock.com.au/live.mp3"
+    }
+  });
+}
+
+export async function GET(request: Request) {
+  // 1) Real continuous encoder if configured
+  const external = await tryExternalStream();
+  if (external) return external;
+
+  // 2) Locked In Radio track proxy (current station song as progressive audio)
+  //    Disabled only when DJ420_DISABLE_TRACK_AUDIO=1 (emergency).
+  if (process.env.DJ420_DISABLE_TRACK_AUDIO !== "1") {
+    try {
+      const trackResponse = await proxyCurrentTrackResponse(request);
+      if (trackResponse.ok || trackResponse.status === 206) {
+        return trackResponse;
+      }
+    } catch (error) {
+      console.error("[live.mp3] track proxy failed", error);
     }
   }
 
+  // 3) Silent last resort — client may fall back to YouTube for audible music
   try {
     return await serveSilent();
   } catch {
     return NextResponse.json({ error: "live.mp3 unavailable" }, { status: 503 });
   }
+}
+
+export async function HEAD(request: Request) {
+  const get = await GET(request);
+  return new NextResponse(null, {
+    status: get.status,
+    headers: get.headers
+  });
 }

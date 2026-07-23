@@ -3,7 +3,10 @@
 import { useEffect, useState } from "react";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import JukeboxForm from "@/components/JukeboxForm";
-import { LEAFLOCK_MOBILE_AUDIO_ID } from "@/lib/leaflock-mobile-audio";
+import {
+  LEAFLOCK_MOBILE_AUDIO_B_ID,
+  LEAFLOCK_MOBILE_AUDIO_ID
+} from "@/lib/leaflock-mobile-audio";
 
 export type ListenMode = "live" | "solo";
 
@@ -99,14 +102,19 @@ export default function FmListenMode() {
 
   return (
     <div className="space-y-6">
-      {/* Permanent phone media host — outside LeafLockPlayer key={mode} so it never remounts.
-          Holds Media Session / lock-screen while YouTube is the music engine. */}
-      {/* Permanent Live Radio element — src set once to /live.mp3 by the player. */}
+      {/* Permanent LeafLock Locked In Radio element — survives player remounts.
+          Live room music plays here so it continues after you leave Chrome. */}
       <audio
         id={LEAFLOCK_MOBILE_AUDIO_ID}
         playsInline
         preload="auto"
-        loop
+        className="pointer-events-none absolute h-px w-px opacity-0"
+        aria-hidden
+      />
+      <audio
+        id={LEAFLOCK_MOBILE_AUDIO_B_ID}
+        playsInline
+        preload="auto"
         className="pointer-events-none absolute h-px w-px opacity-0"
         aria-hidden
       />
@@ -125,10 +133,10 @@ export default function FmListenMode() {
             }`}
           >
             <span className="block text-sm font-semibold">
-              {mode === "live" ? "Join live room (tap to start)" : "Join live room"}
+              {mode === "live" ? "Locked In Radio (tap to start)" : "Join live room"}
             </span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Tap once — music starts in sync with everyone. DJ blend between songs.
+              Continuous radio — keeps playing after you leave the app. Everyone in sync.
             </span>
           </button>
           <button

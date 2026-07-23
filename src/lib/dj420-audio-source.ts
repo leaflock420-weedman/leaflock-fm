@@ -13,6 +13,9 @@ type CachedUrl = {
 const urlCache = new Map<string, CachedUrl>();
 const CACHE_MS = 2.5 * 60 * 60 * 1000;
 let ensureBinPromise: Promise<string | null> | null = null;
+/** Serialize yt-dlp so Render starter never runs many processes (OOM). */
+let resolveChain: Promise<unknown> = Promise.resolve();
+const inflightResolves = new Map<string, Promise<CachedUrl | null>>();
 
 function candidateBins(): string[] {
   const name = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
@@ -161,26 +164,17 @@ async function resolveWithYtDlp(videoId: string): Promise<string> {
   const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const cookieFlags = cookiesArgs();
 
-  // Render IPs often need cookies; try non-web clients first.
+  // Prefer light clients first; stop after first success (less CPU/RAM on Render).
   const clientVariants = [
     "youtube:player_client=tv_embedded",
-    "youtube:player_client=android_vr",
-    "youtube:player_client=web_embedded",
-    "youtube:player_client=ios",
-    "youtube:player_client=android"
+    "youtube:player_client=android",
+    "youtube:player_client=ios"
   ];
 
   const bin = await ensureYtDlpBinary();
   const runners: Array<(args: string[]) => Promise<string>> = [];
-  if (bin) runners.push((args) => runProcess(bin, args));
-  runners.push((args) => runProcess("yt-dlp", args));
-  runners.push((args) =>
-    runProcess(process.platform === "win32" ? "python" : "python3", [
-      "-m",
-      "yt_dlp",
-      ...args
-    ])
-  );
+  if (bin) runners.push((args) => runProcess(bin, args, 35_000));
+  runners.push((args) => runProcess("yt-dlp", args, 35_000));
 
   let lastError: unknown;
   for (const clientArg of clientVariants) {
@@ -190,6 +184,7 @@ async function resolveWithYtDlp(videoId: string): Promise<string> {
       "-g",
       "--no-playlist",
       "--no-warnings",
+      "--no-check-certificates",
       "--extractor-args",
       clientArg,
       ...cookieFlags,
@@ -214,26 +209,45 @@ export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl
     return cached;
   }
 
-  try {
-    const url = await resolveWithYtDlp(videoId);
-    const contentType =
-      url.includes("mime=audio%2Fmp4") || url.includes("itag=140")
-        ? "audio/mp4"
-        : url.includes("webm")
-          ? "audio/webm"
-          : "audio/mp4";
+  const existing = inflightResolves.get(videoId);
+  if (existing) return existing;
 
-    const entry: CachedUrl = {
-      url,
-      contentType,
-      expiresAt: Date.now() + CACHE_MS
-    };
-    urlCache.set(videoId, entry);
-    return entry;
-  } catch (error) {
-    console.error("[dj420-audio] resolve failed", videoId, error);
-    return null;
-  }
+  const job = (async () => {
+    // Global queue: never run parallel yt-dlp on the web dyno.
+    const prev = resolveChain;
+    let release!: () => void;
+    resolveChain = new Promise<void>((r) => {
+      release = r;
+    });
+    await prev.catch(() => undefined);
+
+    try {
+      const url = await resolveWithYtDlp(videoId);
+      const contentType =
+        url.includes("mime=audio%2Fmp4") || url.includes("itag=140")
+          ? "audio/mp4"
+          : url.includes("webm")
+            ? "audio/webm"
+            : "audio/mp4";
+
+      const entry: CachedUrl = {
+        url,
+        contentType,
+        expiresAt: Date.now() + CACHE_MS
+      };
+      urlCache.set(videoId, entry);
+      return entry;
+    } catch (error) {
+      console.error("[dj420-audio] resolve failed", videoId, error);
+      return null;
+    } finally {
+      release();
+      inflightResolves.delete(videoId);
+    }
+  })();
+
+  inflightResolves.set(videoId, job);
+  return job;
 }
 
 export type LiveTrackAudio = {
@@ -312,7 +326,8 @@ function buildProxyResponse(upstream: Response, track: LiveTrackAudio): Response
   headers.set("Cache-Control", "no-store, no-cache");
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Accept-Ranges", "bytes");
-  headers.set("X-LeafLock-Audio-Source", "dj420-track");
+  headers.set("X-LeafLock-Audio-Source", "radio");
+  headers.set("X-LeafLock-Station", "LeafLock Locked In Radio");
   headers.set("X-LeafLock-Mount", "https://fm.leaflock.com.au/live.mp3");
   headers.set("X-LeafLock-Video-Id", track.videoId);
   headers.set("X-LeafLock-Title", encodeURIComponent(track.title));

@@ -32,21 +32,25 @@ import {
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
 import {
+  advanceLiveRadioToNextTrack,
+  crossfadeLockedInRadio,
   ensureLiveRadioSource,
   ensureMobileBackgroundAudio,
   getLeaflockMobileAudio,
+  isLiveRadioPlaying,
   kickPrivateJukeboxHold,
+  LOCKED_IN_RADIO_STATION,
   pauseLiveRadioAudio,
   pauseMobileBackgroundAudio,
-  probeLiveAudioMode,
+  probeLiveMountHasMusic,
   resumeLiveRadioAudio,
   setLiveRadioVolume,
-  startLiveRadioAudio,
-  startSilentMediaHost
+  startLockedInRadio,
+  startSilentMediaHost,
+  updateLockedInRadioMetadata
 } from "@/lib/leaflock-mobile-audio";
 import {
   acquireLeaflockWakeLock,
-  isYtDeckAudible,
   releaseLeaflockWakeLock
 } from "@/lib/leaflock-keep-awake";
 
@@ -621,17 +625,14 @@ export default function LeafLockPlayer({
   }, []);
 
   /**
-   * Live Radio always keeps permanent /api/fm/listen playing (survives leaving Chrome).
-   * - Real stream online → stream is the music, YouTube muted
-   * - Stream offline → YouTube is the music, permanent audio keeps session alive
-   * Private jukebox: YouTube + soft hold.
+   * Live room = LeafLock Locked In Radio (HTML /live.mp3) — continues after exit.
+   * Private jukebox = YouTube + soft hold.
    */
   const syncMediaBridge = useCallback(
     async (playing: boolean) => {
       if (!playing) {
         pauseLiveRadioAudio();
         pauseMobileBackgroundAudio();
-        liveUsesStreamRef.current = false;
         const local = mediaBridgeRef.current;
         if (local) {
           try {
@@ -643,18 +644,12 @@ export default function LeafLockPlayer({
         return;
       }
 
-      const vol = Math.max(0.15, volumeRef.current / 100);
+      const vol = Math.max(0.35, volumeRef.current / 100);
 
       if (listenModeRef.current === "live") {
-        // Keep permanent host alive for Media Session; volume depends on stream mode.
-        if (liveUsesStreamRef.current) {
-          startLiveRadioAudio(vol);
-          muteYouTubeDecks();
-        } else {
-          // YouTube is the music — host only keeps OS pull-down / lock controls alive.
-          startSilentMediaHost();
-          setLiveRadioVolume(0.02, false);
-        }
+        liveUsesStreamRef.current = true;
+        void startLockedInRadio({ volume01: vol });
+        muteYouTubeDecks();
         bindMediaSessionRef.current();
         updateMediaSessionRef.current(true);
         return;
@@ -668,10 +663,29 @@ export default function LeafLockPlayer({
         void local.play().catch(() => undefined);
       }
     },
-    [muteYouTubeDecks, unmuteYouTubeDecks]
+    [muteYouTubeDecks]
   );
 
   const syncPlaybackProgress = useCallback(() => {
+    // Locked In Radio: progress from permanent <audio>
+    if (listenModeRef.current === "live" && liveUsesStreamRef.current) {
+      const audio = getLeaflockMobileAudio();
+      if (!audio || blendInProgressRef.current) return;
+      try {
+        const time = audio.currentTime;
+        const total = resolveTrackDuration(
+          Number.isFinite(audio.duration) ? audio.duration : 0,
+          liveCurrentDurationRef.current || getCurrentSessionTrack()?.durationSec
+        );
+        if (Number.isFinite(time) && time >= 0) setCurrentTime(time);
+        if (Number.isFinite(total) && total > 0) setDuration(total);
+        if (Number.isFinite(time) && total > 0) syncMediaSessionPosition(time, total);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     const player = getActivePlayer();
     if (!player || !currentVideoIdRef.current || blendInProgressRef.current || isSeekingRef.current) {
       return;
@@ -1223,15 +1237,8 @@ export default function LeafLockPlayer({
   useEffect(() => {
     volumeRef.current = volume;
     if (userPlaybackIntentRef.current === "playing" && listenModeRef.current === "live") {
-      if (liveUsesStreamRef.current) {
-        setLiveRadioVolume(volume / 100, isMuted);
-        muteYouTubeDecks();
-      } else {
-        setLiveRadioVolume(0.02, false);
-        if (!blendInProgressRef.current) {
-          applyDeckVolume(activeDeckRef.current, 1);
-        }
-      }
+      setLiveRadioVolume(volume / 100, isMuted);
+      muteYouTubeDecks();
       return;
     }
     if (!blendInProgressRef.current) {
@@ -1392,7 +1399,35 @@ export default function LeafLockPlayer({
         Boolean(options?.resumePlayback) ||
         userPlaybackIntentRef.current === "playing";
 
-      // Live handoff: ALWAYS dual-deck DJ crossfade when already playing (no hard cuts).
+      // Locked In Radio path: dual HTML-audio crossfade on the permanent mount.
+      if (
+        videoChanged &&
+        shouldPlay &&
+        !options?.initialCue &&
+        liveUsesStreamRef.current &&
+        (isPlayingRef.current || isLiveRadioPlaying())
+      ) {
+        stationRevisionRef.current = station.revision;
+        outsidePlaylistAllowedRef.current = track.videoId;
+        liveStationJoinedRef.current = true;
+        liveCurrentDurationRef.current = durationMeta || liveCurrentDurationRef.current;
+        setTrackUi(video, track.artist ?? LOCKED_IN_RADIO_STATION);
+        const vol = Math.max(0.55, volumeRef.current / 100);
+        void crossfadeLockedInRadio(vol, Math.min(resumeAt, 2));
+        updateLockedInRadioMetadata({
+          title: track.title,
+          artist: track.artist ?? LOCKED_IN_RADIO_STATION,
+          artworkUrl: station.thumbnail ?? null,
+          playing: true
+        });
+        isPlayingRef.current = true;
+        ytActuallyPlayingRef.current = true;
+        setIsPlaying(true);
+        muteYouTubeDecks();
+        return;
+      }
+
+      // YouTube fallback path only: dual-deck DJ crossfade.
       if (
         videoChanged &&
         shouldPlay &&
@@ -1498,6 +1533,7 @@ export default function LeafLockPlayer({
       applyDeckVolume,
       beginBlendToVideo,
       getActivePlayer,
+      muteYouTubeDecks,
       prefetchOnInactiveDeck,
       resizePlayerHosts,
       setTrackUi,
@@ -1509,108 +1545,84 @@ export default function LeafLockPlayer({
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  // Leaving Chrome / Home / lock / freeze: do nothing destructive.
-  // Do not pause, stop, mute, destroy, unload or reset the live audio element.
-  // Re-kick host + YouTube whenever the OS pauses us or the tab comes back.
+  // Locked In Radio: permanent <audio> keeps playing after soft-switch / lock.
+  // On track end → load next station song on the same /live.mp3 mount.
 
   useEffect(() => {
     ensureLiveRadioSource();
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
 
-    const reassertMediaHost = () => {
+    const vol = () => Math.max(0.55, volumeRef.current / 100);
+
+    const reassertRadio = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
       if (listenModeRef.current !== "live") {
         void ensureMobileBackgroundAudio();
         return;
       }
-      if (liveUsesStreamRef.current) {
-        void resumeLiveRadioAudio(volumeRef.current / 100 || 0.85);
-        muteYouTubeDecks();
-      } else {
-        startSilentMediaHost();
-        void resumeLiveRadioAudio(0.02);
-        try {
-          const player = playersRef.current[activeDeckRef.current];
-          player?.unMute();
-          player?.setVolume(Math.max(1, volumeRef.current));
-          player?.playVideo();
-        } catch {
-          // ignore
-        }
-      }
+      liveUsesStreamRef.current = true;
+      muteYouTubeDecks();
+      void resumeLiveRadioAudio(vol());
       bindMediaSessionRef.current();
       updateMediaSessionRef.current(true);
+      void acquireLeaflockWakeLock();
     };
 
-    // OS sometimes pauses background audio — restart permanent mount only.
     const onPause = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
+      if (listenModeRef.current !== "live") return;
       window.setTimeout(() => {
         if (userPlaybackIntentRef.current !== "playing") return;
-        reassertMediaHost();
+        reassertRadio();
       }, 80);
     };
 
     const onPlaying = () => {
-      if (listenModeRef.current === "live" && liveUsesStreamRef.current) {
-        muteYouTubeDecks();
-      }
-      if (userPlaybackIntentRef.current === "playing") {
-        updateMediaSessionRef.current(true);
-      }
+      if (listenModeRef.current !== "live") return;
+      if (userPlaybackIntentRef.current !== "playing") return;
+      isPlayingRef.current = true;
+      ytActuallyPlayingRef.current = true;
+      setIsPlaying(true);
+      setIsBuffering(false);
+      muteYouTubeDecks();
+      updateMediaSessionRef.current(true);
+    };
+
+    const onEnded = () => {
+      if (userPlaybackIntentRef.current !== "playing") return;
+      if (listenModeRef.current !== "live") return;
+      // Next station track on the same mount (continues in background).
+      advanceLiveRadioToNextTrack(vol());
+      void fetchLiveStation()
+        .then((station) => {
+          if (userPlaybackIntentRef.current !== "playing") return;
+          applyLiveStationTrackRef.current(station, {
+            resumePlayback: true
+          });
+        })
+        .catch(() => undefined);
     };
 
     const onVisibility = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
-      // Always keep host alive when hidden; full re-kick when visible again.
-      reassertMediaHost();
-      if (document.visibilityState === "visible" && listenModeRef.current === "live") {
-        void fetchLiveStation()
-          .then((station) => {
-            if (userPlaybackIntentRef.current !== "playing") return;
-            applyLiveStationTrackRef.current(station, {
-              resumePlayback: true
-            });
-          })
-          .catch(() => undefined);
-      }
+      reassertRadio();
     };
-
-    const onPageShow = () => reassertMediaHost();
-    const onFocus = () => reassertMediaHost();
 
     audio.addEventListener("pause", onPause);
     audio.addEventListener("playing", onPlaying);
-    audio.addEventListener("ended", onPause);
+    audio.addEventListener("ended", onEnded);
     document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pageshow", onPageShow);
-    window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", reassertRadio);
+    window.addEventListener("focus", reassertRadio);
 
-    // Keep-alive while intent is playing (Android often suspends muted/near-silent media).
     const keepAliveId = window.setInterval(() => {
       if (userPlaybackIntentRef.current !== "playing") return;
       if (listenModeRef.current !== "live") return;
-      if (liveUsesStreamRef.current) {
-        if (audio.paused) void resumeLiveRadioAudio(volumeRef.current / 100 || 0.85);
-      } else {
-        startSilentMediaHost();
-        if (audio.paused) void resumeLiveRadioAudio(0.02);
-        // Try to keep YouTube running while still allowed (often works on soft-minimize).
-        try {
-          const YT = window.YT;
-          const player = playersRef.current[activeDeckRef.current];
-          const state = player?.getPlayerState?.();
-          if (
-            player &&
-            YT &&
-            state !== YT.PlayerState.PLAYING &&
-            state !== YT.PlayerState.BUFFERING
-          ) {
-            player.playVideo();
-          }
-        } catch {
-          // ignore
+      if (audio.paused || audio.ended) {
+        void resumeLiveRadioAudio(vol());
+        if (audio.ended || audio.error) {
+          advanceLiveRadioToNextTrack(vol());
         }
       }
       if ("mediaSession" in navigator) {
@@ -1620,15 +1632,15 @@ export default function LeafLockPlayer({
           // ignore
         }
       }
-    }, 4000);
+    }, 5000);
 
     return () => {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("playing", onPlaying);
-      audio.removeEventListener("ended", onPause);
+      audio.removeEventListener("ended", onEnded);
       document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pageshow", onPageShow);
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", reassertRadio);
+      window.removeEventListener("focus", reassertRadio);
       window.clearInterval(keepAliveId);
     };
   }, [muteYouTubeDecks]);
@@ -2272,94 +2284,133 @@ export default function LeafLockPlayer({
 
   /**
    * Synchronous gesture kick — MUST run in the click/touch stack so Chrome
-   * allows autoplay. Call this from Join live room / overlay / Play.
+   * allows autoplay. Starts LeafLock Locked In Radio (HTML audio), not YouTube.
    */
   const kickLiveGesture = useCallback(() => {
     userPausedLiveRef.current = false;
     userPlaybackIntentRef.current = "playing";
     persistLivePlaying(true);
-    liveUsesStreamRef.current = false;
+    liveUsesStreamRef.current = true;
     setPlaybackError(null);
     setIsBuffering(true);
 
-    // Same-stack media unlocks (critical for mobile).
-    startSilentMediaHost();
-    void resumeLiveRadioAudio(0.02);
+    const vol = Math.max(0.55, volumeRef.current / 100);
+    // Same-stack unlock of the permanent radio element (survives exit).
+    void startLockedInRadio({ volume01: vol, forceReload: true });
     void acquireLeaflockWakeLock();
+    muteYouTubeDecks();
     try {
-      const player = getActivePlayer();
-      if (player) {
-        player.unMute();
-        player.setVolume(Math.max(1, volumeRef.current));
-        player.playVideo();
-        applyDeckVolume(activeDeckRef.current, 1);
-      }
+      playersRef.current.a?.pauseVideo();
+      playersRef.current.b?.pauseVideo();
     } catch {
       // ignore
     }
     bindMediaSessionRef.current();
-    // Do NOT set isPlaying=true until YouTube reports PLAYING — otherwise the
-    // "Tap to enter" overlay vanishes while autoplay is still blocked.
     setIsConnected(true);
     updateMediaSessionRef.current(true);
     startTimePolling();
-    void syncMediaBridge(true);
-  }, [applyDeckVolume, getActivePlayer, startTimePolling, syncMediaBridge]);
+  }, [muteYouTubeDecks, startTimePolling]);
 
   const startLivePlayback = useCallback(async () => {
-    // YouTube = music. Silent host = Media Session. No yt-dlp on web service.
+    // LeafLock Locked In Radio = music that continues after you leave the app.
     kickLiveGesture();
 
     try {
       const station = await fetchLiveStation();
       if (userPlaybackIntentRef.current !== "playing") return;
-      await playLiveYouTube(station);
 
-      // Prefer YouTube for live music. Only switch to stream if a REAL Icecast is up.
-      // Never mute YouTube for a silent /live.mp3 host.
-      const mode = await probeLiveAudioMode();
-      if (userPlaybackIntentRef.current !== "playing") return;
-      if (mode !== "stream") {
+      const vol = Math.max(0.55, volumeRef.current / 100);
+      const offset = Math.max(0, station.currentOffsetSeconds ?? station.offsetSeconds ?? 0);
+
+      setRequestCredit(station.requestCredit);
+      setUpNext(station.upNext ?? station.nextTitle ?? null);
+      setLiveRoomLabel(
+        station.hostStatus === "online"
+          ? station.listenerCount && station.listenerCount > 0
+            ? `Locked In Radio — ${station.listenerCount} listening`
+            : "LeafLock Locked In Radio"
+          : "Station host reconnecting"
+      );
+      if (station.current?.videoId) {
+        setTrackUi(
+          {
+            id: station.current.videoId,
+            title: station.current.title,
+            channelTitle: station.current.artist,
+            durationSec: station.current.durationSec ?? station.durationSec
+          },
+          station.current.artist ?? LOCKED_IN_RADIO_STATION
+        );
+        liveCurrentDurationRef.current =
+          station.current.durationSec ?? station.durationSec ?? 0;
+        outsidePlaylistAllowedRef.current = station.current.videoId;
+        stationRevisionRef.current = station.revision;
+        liveStationJoinedRef.current = true;
+      }
+      if (station.nextVideoId) {
+        liveNextTrackRef.current = {
+          id: station.nextVideoId,
+          title: station.nextTitle ?? "Up next",
+          channelTitle: LOCKED_IN_RADIO_STATION
+        };
+      }
+
+      const started = await startLockedInRadio({
+        volume01: vol,
+        forceReload: true,
+        offsetSeconds: offset
+      });
+
+      if (started || isLiveRadioPlaying()) {
+        liveUsesStreamRef.current = true;
+        isPlayingRef.current = true;
+        ytActuallyPlayingRef.current = true; // radio is audible path
+        setIsPlaying(true);
         setIsBuffering(false);
-        unmuteYouTubeDecks();
-        try {
-          getActivePlayer()?.playVideo();
-        } catch {
-          // ignore
-        }
+        setIsConnected(true);
+        muteYouTubeDecks();
+        updateLockedInRadioMetadata({
+          title: station.current?.title ?? "Live",
+          artist: station.current?.artist ?? LOCKED_IN_RADIO_STATION,
+          artworkUrl: station.thumbnail ?? null,
+          playing: true
+        });
+        updateMediaSessionRef.current(true);
+        void acquireLeaflockWakeLock();
         return;
       }
 
-      const vol = Math.max(0.55, volumeRef.current / 100);
-      liveUsesStreamRef.current = true;
-      startLiveRadioAudio(vol);
-      setLiveRadioVolume(vol, false);
-      void resumeLiveRadioAudio(vol);
-      muteYouTubeDecks();
-      try {
-        playersRef.current.a?.pauseVideo();
-        playersRef.current.b?.pauseVideo();
-      } catch {
-        // ignore
+      // Radio mount empty (silent) — temporary YouTube fallback so room isn't mute.
+      const hasMusic = await probeLiveMountHasMusic();
+      if (!hasMusic && userPlaybackIntentRef.current === "playing") {
+        liveUsesStreamRef.current = false;
+        setPlaybackError("Radio mount warming up — using temporary sync. Retrying Locked In Radio…");
+        await playLiveYouTube(station);
+        window.setTimeout(() => {
+          if (userPlaybackIntentRef.current !== "playing") return;
+          void startLockedInRadio({ volume01: vol, forceReload: true, offsetSeconds: 0 }).then(
+            (ok) => {
+              if (!ok) return;
+              liveUsesStreamRef.current = true;
+              muteYouTubeDecks();
+              try {
+                playersRef.current.a?.pauseVideo();
+                playersRef.current.b?.pauseVideo();
+              } catch {
+                // ignore
+              }
+              setPlaybackError(null);
+            }
+          );
+        }, 8000);
       }
+
       setIsBuffering(false);
-      updateMediaSessionRef.current(true);
     } catch {
       setIsBuffering(false);
-      try {
-        getActivePlayer()?.playVideo();
-        unmuteYouTubeDecks();
-      } catch {
-        setPlaybackError("Could not join the live room. Tap Join live room again.");
-      }
+      setPlaybackError("Could not join Locked In Radio. Tap Enter again.");
     }
-  }, [
-    getActivePlayer,
-    kickLiveGesture,
-    muteYouTubeDecks,
-    playLiveYouTube,
-    unmuteYouTubeDecks
-  ]);
+  }, [kickLiveGesture, muteYouTubeDecks, playLiveYouTube, setTrackUi]);
 
   useEffect(() => {
     startLivePlaybackRef.current = startLivePlayback;
@@ -2380,29 +2431,30 @@ export default function LeafLockPlayer({
     return () => window.removeEventListener("leaflock-live-join", onJoin);
   }, []);
 
-  // When decks become ready after a gesture was already fired, finish join.
+  // Live radio does not wait on YouTube decks — join as soon as playlist metadata is ready.
   useEffect(() => {
     if (listenMode !== "live" || !autoStartLive) return;
-    if (!playlistReady || !playersReady) return;
+    if (!playlistReady) return;
     if (userPausedLiveRef.current) return;
-    if (ytActuallyPlayingRef.current) return;
+    if (isLiveRadioPlaying() || ytActuallyPlayingRef.current) return;
     if (userPlaybackIntentRef.current !== "playing" && !readLiveWasPlaying()) return;
 
     userPlaybackIntentRef.current = "playing";
     persistLivePlaying(true);
     void startLivePlaybackRef.current();
-  }, [autoStartLive, autoStartNonce, listenMode, playlistReady, playersReady]);
+  }, [autoStartLive, autoStartNonce, listenMode, playlistReady]);
 
-  // Gesture unlock: re-kick whenever YT is not actually playing (not just UI state).
+  // Gesture unlock: re-kick Locked In Radio whenever it is not actually audible.
   useEffect(() => {
     if (listenMode !== "live" || !autoStartLive) return;
     let lastKick = 0;
 
     const unlock = () => {
       if (userPausedLiveRef.current) return;
-      const ytOk = isYtDeckAudible(getActivePlayer(), window.YT);
-      if (ytOk) {
+      if (isLiveRadioPlaying()) {
         ytActuallyPlayingRef.current = true;
+        isPlayingRef.current = true;
+        setIsPlaying(true);
         return;
       }
       const now = Date.now();
@@ -2420,17 +2472,16 @@ export default function LeafLockPlayer({
       window.removeEventListener("touchstart", unlock, true);
       window.removeEventListener("keydown", unlock, true);
     };
-  }, [autoStartLive, getActivePlayer, listenMode]);
+  }, [autoStartLive, listenMode]);
 
   const togglePlay = () => {
-    // —— LIVE RADIO ——
+    // —— LEAFLOCK LOCKED IN RADIO ——
     if (listenModeRef.current === "live") {
-      if (isPlaying && ytActuallyPlayingRef.current) {
+      if (isPlaying && (isLiveRadioPlaying() || ytActuallyPlayingRef.current)) {
         userPlaybackIntentRef.current = "paused";
         userPausedLiveRef.current = true;
         ytActuallyPlayingRef.current = false;
         persistLivePlaying(false);
-        liveUsesStreamRef.current = false;
         pauseLiveRadioAudio();
         void releaseLeaflockWakeLock();
         try {
@@ -2540,18 +2591,11 @@ export default function LeafLockPlayer({
         userPlaybackIntentRef.current = "playing";
         if (listenModeRef.current === "live") {
           persistLivePlaying(true);
-          const vol = volumeRef.current / 100 || 0.85;
-          void resumeLiveRadioAudio(liveUsesStreamRef.current ? vol : 0.001);
-          if (liveUsesStreamRef.current) {
-            muteYouTubeDecks();
-          } else {
-            unmuteYouTubeDecks();
-            try {
-              getActivePlayer()?.playVideo();
-            } catch {
-              // ignore
-            }
-          }
+          liveUsesStreamRef.current = true;
+          const vol = Math.max(0.55, volumeRef.current / 100 || 0.85);
+          void startLockedInRadio({ volume01: vol, forceReload: false });
+          void resumeLiveRadioAudio(vol);
+          muteYouTubeDecks();
         } else {
           try {
             getActivePlayer()?.playVideo();
@@ -2629,7 +2673,7 @@ export default function LeafLockPlayer({
         title: nowPlaying.title,
         artist: nowPlaying.artist,
         album: live
-          ? "LeafLock FM Live"
+          ? LOCKED_IN_RADIO_STATION
           : djBlendEnabled
             ? "LeafLock FM DJ Blend"
             : "LeafLock FM Shuffle",
@@ -2637,8 +2681,16 @@ export default function LeafLockPlayer({
       });
       navigator.mediaSession.playbackState = playing ? "playing" : "paused";
 
-      // Timeline from YouTube only when YouTube is the audible path.
-      if (playing && (!live || !liveUsesStreamRef.current)) {
+      if (playing && live) {
+        const audio = getLeaflockMobileAudio();
+        if (audio && !audio.paused && Number.isFinite(audio.currentTime)) {
+          const total =
+            Number.isFinite(audio.duration) && audio.duration > 0
+              ? audio.duration
+              : liveCurrentDurationRef.current || duration || 300;
+          syncMediaSessionPosition(audio.currentTime, total);
+        }
+      } else if (playing) {
         syncMediaSessionPosition(currentTime, duration);
       }
     },
@@ -2845,15 +2897,15 @@ export default function LeafLockPlayer({
           className="absolute inset-0 z-30 flex flex-col items-center justify-center rounded-3xl bg-black/80 px-6 text-center backdrop-blur-sm"
         >
           <span className="text-xs font-bold uppercase tracking-[0.28em] text-emerald-400">
-            Live Room
+            LeafLock Locked In Radio
           </span>
-          <span className="mt-3 text-2xl font-semibold text-white">Tap to enter</span>
+          <span className="mt-3 text-2xl font-semibold text-white">Tap to tune in</span>
           <span className="mt-2 max-w-xs text-sm text-zinc-400">
-            Starts music in sync — DJ blend between songs. One tap unlocks autoplay on your phone.
+            Continuous radio — keeps playing after you leave Chrome. One tap starts the stream.
           </span>
           <span className="mt-6 inline-flex items-center gap-2 rounded-full bg-emerald-500 px-6 py-3 text-sm font-bold text-black">
             <Play className="h-4 w-4" fill="currentColor" />
-            Enter live room
+            Enter Locked In Radio
           </span>
         </button>
       ) : null}
@@ -3106,21 +3158,21 @@ export default function LeafLockPlayer({
             "DJ blend in progress — equal-power crossfade"
           ) : isConnected && isPlaying ? (
             listenMode === "live"
-              ? "Live room — synced · DJ blend between songs"
+              ? "LeafLock Locked In Radio — continuous stream"
               : djBlendEnabled
                 ? "DJ blend — last 15s prep, ~9s crossfade"
                 : "Shuffling your playlist — no repeat within 60 minutes"
           ) : isLoadingPlaylist ? (
             "Loading YouTube playlist..."
           ) : listenMode === "live" ? (
-            "Tap Enter live room above to start"
+            "Tap Enter Locked In Radio above to start"
           ) : (
             "Tap play to start shuffled playlist"
           )}
           {listenMode === "live" ? (
             <span className="mt-2 block text-xs text-zinc-500">
-              Screen stays awake while playing. Soft-switch apps carefully — force-closing Chrome
-              still stops YouTube (browser limit). DJ blend runs on dual decks between tracks.
+              This is Locked In Radio (not YouTube). Leave the app and the radio keeps going on
+              the lock screen / pull-down controls. Pause here or close the tab to stop.
             </span>
           ) : isMobile ? (
             <span className="mt-2 block text-xs text-zinc-500">
