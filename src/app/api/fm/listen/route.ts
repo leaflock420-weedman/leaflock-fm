@@ -1,22 +1,20 @@
-import { proxyCurrentTrackResponse } from "@/lib/dj420-audio-source";
+import { serveCurrentTrackForMount } from "@/lib/dj420-audio-source";
 import { readFile } from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 /**
- * LeafLock Locked In Radio — permanent mount:
- *   https://fm.leaflock.com.au/live.mp3
+ * LeafLock Locked In Radio mount: https://fm.leaflock.com.au/live.mp3
  *
- * This is the audio that continues after you leave Chrome (HTML <audio>).
+ * WHY STREAMS USED TO STOP:
+ * Proxying multi‑MB audio through Render/Cloudflare times out mid-track.
  *
- * Priority:
- * 1) DJ420_UPSTREAM_URL / PRIMARY_STREAM_URL — real Icecast/Liquidsoap (best)
- * 2) Current live-station track audio (yt-dlp URL resolve + stream proxy; cached, single-flight)
- * 3) silent.mp3 last resort (not music)
+ * FIX: resolve a direct audio URL (Piped/Invidious) and 302 redirect the
+ * browser there. HTML <audio> keeps playing after you leave Chrome.
  */
 
 function isSelfUrl(url: string): boolean {
@@ -99,24 +97,23 @@ async function serveSilent(): Promise<Response> {
 }
 
 export async function GET(request: Request) {
-  // 1) Real continuous encoder if configured
+  // 1) Real Icecast/Liquidsoap if configured
   const external = await tryExternalStream();
   if (external) return external;
 
-  // 2) Locked In Radio track proxy (current station song as progressive audio)
-  //    Disabled only when DJ420_DISABLE_TRACK_AUDIO=1 (emergency).
+  // 2) Current station track → 302 to direct audio CDN (does not die mid-track on Render)
   if (process.env.DJ420_DISABLE_TRACK_AUDIO !== "1") {
     try {
-      const trackResponse = await proxyCurrentTrackResponse(request);
-      if (trackResponse.ok || trackResponse.status === 206) {
+      const trackResponse = await serveCurrentTrackForMount(request);
+      if (trackResponse.status === 302 || trackResponse.ok || trackResponse.status === 206) {
         return trackResponse;
       }
     } catch (error) {
-      console.error("[live.mp3] track proxy failed", error);
+      console.error("[live.mp3] track resolve failed", error);
     }
   }
 
-  // 3) Silent last resort — client may fall back to YouTube for audible music
+  // 3) Last resort — client must treat as failure and keep retrying
   try {
     return await serveSilent();
   } catch {

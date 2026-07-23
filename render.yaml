@@ -4,7 +4,7 @@ services:
     runtime: node
     # Paid Starter — always-on (no free-tier cold starts)
     plan: starter
-    # Lightweight web process — do NOT run yt-dlp here (OOM on Starter).
+    # Live radio uses ytdl-core URL resolve + 302 redirect (no stream proxy = no mid-track timeout).
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health
@@ -30,7 +30,12 @@ services:
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
       - key: NEXT_PUBLIC_YOUTUBE_PLAYLIST_ID
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
-      # Optional: real Icecast/Liquidsoap URL (NOT this app — avoids loops & OOM)
+      # Do not proxy multi-MB audio through Render (that is what made live.mp3 stop).
+      - key: DJ420_FORCE_PROXY
+        value: "0"
+      - key: DJ420_DISABLE_TRACK_AUDIO
+        value: "0"
+      # Optional: real Icecast/Liquidsoap URL (best continuous radio)
       # DJ420_UPSTREAM_URL: https://your-icecast:8000/live.mp3
       - key: NEXT_PUBLIC_STREAM_URL
         value: https://fm.leaflock.com.au/live.mp3

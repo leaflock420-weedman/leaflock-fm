@@ -1,11 +1,9 @@
 /**
  * LeafLock Locked In Radio — permanent HTML <audio> engine.
  *
- * Live room music plays here (NOT YouTube). This is what continues after you
- * leave Chrome / soft-switch / lock the screen — browser Media Session +
- * progressive /live.mp3 (or Icecast if DJ420_UPSTREAM_URL is set).
- *
- * Private jukebox still uses YouTube + a near-silent host for session chrome.
+ * Plays a DIRECT CDN audio URL from /api/fm/radio-url (not a Render-proxied
+ * multi‑MB stream that times out mid-song). That is what keeps going after
+ * you leave Chrome / lock the phone.
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
@@ -15,17 +13,30 @@ export const DJ420_PUBLIC_STREAM_URL = "https://fm.leaflock.com.au/live.mp3";
 export const LOCKED_IN_RADIO_STATION = "LeafLock Locked In Radio";
 
 const HOST_VOLUME = 0.02;
-const BLEND_MS = 8000;
+const BLEND_MS = 7000;
 
 export type LiveAudioMode = "stream" | "radio" | "hold-loop" | "silent" | "unknown";
 
-function liveStreamUrl(cacheBust = true): string {
-  const base =
-    typeof window === "undefined"
-      ? LIVE_RADIO_STREAM_PATH
-      : `${window.location.origin}${LIVE_RADIO_STREAM_PATH}`;
-  return cacheBust ? `${base}?t=${Date.now()}` : base;
-}
+export type RadioTrackPayload = {
+  ok: boolean;
+  url?: string;
+  title?: string;
+  artist?: string;
+  offsetSeconds?: number;
+  durationSec?: number;
+  videoId?: string;
+  revision?: number;
+  thumbnail?: string | null;
+  source?: string;
+  error?: string;
+};
+
+let watchdogTimer: number | null = null;
+let lastWatchdogTime = 0;
+let lastWatchdogPos = 0;
+let radioIntentPlaying = false;
+let lastRadioMeta: RadioTrackPayload | null = null;
+let chainBusy = false;
 
 function silentUrl(): string {
   if (typeof window === "undefined") return "/silent.mp3";
@@ -79,8 +90,13 @@ export function isLockedInRadioMode(): boolean {
   return audio?.dataset.leaflockMode === "live-radio";
 }
 
-/** Near-silent OS host for private jukebox only. */
+export function getLastRadioMeta(): RadioTrackPayload | null {
+  return lastRadioMeta;
+}
+
+/** Near-silent OS host for private jukebox only — never for live radio. */
 export function startSilentMediaHost(): void {
+  if (radioIntentPlaying) return;
   try {
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
@@ -100,38 +116,165 @@ export function startSilentMediaHost(): void {
   }
 }
 
+export async function fetchRadioTrack(): Promise<RadioTrackPayload | null> {
+  try {
+    const res = await fetch(`/api/fm/radio-url?t=${Date.now()}`, { cache: "no-store" });
+    const data = (await res.json()) as RadioTrackPayload;
+    if (!res.ok || !data.ok || !data.url) return null;
+    lastRadioMeta = data;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function bindRadioElementGuards(audio: HTMLAudioElement, volume01: number): void {
+  if (audio.dataset.leaflockGuards === "1") return;
+  audio.dataset.leaflockGuards = "1";
+
+  const kick = () => {
+    if (!radioIntentPlaying) return;
+    if (audio.dataset.leaflockMode !== "live-radio") return;
+    void keepLockedInRadioAlive(volume01);
+  };
+
+  audio.addEventListener("ended", () => {
+    if (!radioIntentPlaying) return;
+    void chainNextRadioTrack(volume01);
+  });
+  audio.addEventListener("error", () => {
+    if (!radioIntentPlaying) return;
+    window.setTimeout(kick, 400);
+  });
+  audio.addEventListener("stalled", () => {
+    if (!radioIntentPlaying) return;
+    window.setTimeout(kick, 800);
+  });
+  audio.addEventListener("suspend", () => {
+    // Some Android builds fire suspend in background — do not stop; resume if paused.
+    if (!radioIntentPlaying) return;
+    if (audio.paused) {
+      void audio.play().catch(() => {
+        window.setTimeout(kick, 500);
+      });
+    }
+  });
+  audio.addEventListener("pause", () => {
+    if (!radioIntentPlaying) return;
+    // OS paused us — force back open (user pause sets radioIntentPlaying=false first).
+    window.setTimeout(() => {
+      if (!radioIntentPlaying) return;
+      if (audio.ended) {
+        void chainNextRadioTrack(volume01);
+        return;
+      }
+      void audio.play().catch(() => {
+        void keepLockedInRadioAlive(volume01);
+      });
+    }, 120);
+  });
+}
+
+function startWatchdog(volume01: number): void {
+  if (typeof window === "undefined") return;
+  if (watchdogTimer !== null) window.clearInterval(watchdogTimer);
+  lastWatchdogTime = Date.now();
+  lastWatchdogPos = 0;
+
+  watchdogTimer = window.setInterval(() => {
+    if (!radioIntentPlaying) return;
+    const audio = getLeaflockMobileAudio();
+    if (!audio || audio.dataset.leaflockMode !== "live-radio") {
+      void keepLockedInRadioAlive(volume01);
+      return;
+    }
+
+    if (audio.ended || audio.error) {
+      void chainNextRadioTrack(volume01);
+      return;
+    }
+
+    if (audio.paused) {
+      void audio.play().catch(() => {
+        void keepLockedInRadioAlive(volume01);
+      });
+      return;
+    }
+
+    // Stall: currentTime not advancing while "playing"
+    const pos = audio.currentTime || 0;
+    const now = Date.now();
+    if (Math.abs(pos - lastWatchdogPos) < 0.05) {
+      if (now - lastWatchdogTime > 6000) {
+        lastWatchdogTime = now;
+        void keepLockedInRadioAlive(volume01);
+      }
+    } else {
+      lastWatchdogPos = pos;
+      lastWatchdogTime = now;
+    }
+
+    if ("mediaSession" in navigator) {
+      try {
+        navigator.mediaSession.playbackState = "playing";
+      } catch {
+        // ignore
+      }
+    }
+  }, 3000);
+}
+
 export type StartLockedInOptions = {
   volume01?: number;
-  /** Seek into the current station track (seconds). */
   offsetSeconds?: number;
   forceReload?: boolean;
 };
 
 /**
- * Start / rejoin LeafLock Locked In Radio on the permanent mount.
- * Call this from a user gesture so mobile autoplay is allowed.
+ * Start Locked In Radio from a user gesture.
+ * Uses direct CDN URL so the stream does not die on Render proxy timeouts.
  */
 export async function startLockedInRadio(
   options: StartLockedInOptions = {}
 ): Promise<boolean> {
   const volume01 = options.volume01 ?? 0.85;
+  radioIntentPlaying = true;
+
   const audio = getLeaflockMobileAudio();
   if (!audio) return false;
 
   hardenAudioEl(audio);
+  bindRadioElementGuards(audio, volume01);
   audio.dataset.leaflockMode = "live-radio";
-  audio.loop = false; // each track ends → client loads next
+  audio.loop = false;
   audio.muted = false;
-  audio.volume = Math.min(1, Math.max(0.35, volume01));
+  audio.volume = Math.min(1, Math.max(0.4, volume01));
 
-  const needNewSrc =
-    options.forceReload ||
-    !audio.src.includes("/live.mp3") ||
-    audio.ended ||
-    audio.error;
+  const track = await fetchRadioTrack();
+  if (!track?.url) {
+    // Fallback: try /live.mp3 redirect mount
+    audio.src = `${typeof window !== "undefined" ? window.location.origin : ""}${LIVE_RADIO_STREAM_PATH}?t=${Date.now()}`;
+    try {
+      await audio.play();
+      startWatchdog(volume01);
+      return !audio.paused;
+    } catch {
+      return false;
+    }
+  }
 
-  if (needNewSrc) {
-    audio.src = liveStreamUrl(true);
+  // Avoid needless reloads mid-song unless forced or track changed.
+  const sameTrack =
+    !options.forceReload &&
+    audio.src &&
+    track.videoId &&
+    audio.dataset.videoId === track.videoId &&
+    !audio.ended &&
+    !audio.error;
+
+  if (!sameTrack) {
+    audio.dataset.videoId = track.videoId || "";
+    audio.src = track.url;
     try {
       audio.load();
     } catch {
@@ -145,16 +288,23 @@ export async function startLockedInRadio(
     return false;
   }
 
-  if (options.offsetSeconds && options.offsetSeconds > 1) {
+  const offset =
+    options.offsetSeconds != null
+      ? options.offsetSeconds
+      : track.offsetSeconds != null
+        ? track.offsetSeconds
+        : 0;
+
+  if (offset > 1.5) {
     const seek = () => {
       try {
-        if (Number.isFinite(audio.duration) && audio.duration > options.offsetSeconds!) {
-          audio.currentTime = Math.min(options.offsetSeconds!, Math.max(0, audio.duration - 1));
-        } else if (options.offsetSeconds! > 0) {
-          audio.currentTime = options.offsetSeconds!;
+        if (Number.isFinite(audio.duration) && audio.duration > offset) {
+          audio.currentTime = Math.min(offset, Math.max(0, audio.duration - 1.5));
+        } else {
+          audio.currentTime = offset;
         }
       } catch {
-        // Some streams reject seek until more data arrives.
+        // ignore
       }
     };
     seek();
@@ -162,61 +312,107 @@ export async function startLockedInRadio(
     audio.addEventListener("canplay", seek, { once: true });
   }
 
+  if (track.title) {
+    updateLockedInRadioMetadata({
+      title: track.title,
+      artist: track.artist || LOCKED_IN_RADIO_STATION,
+      artworkUrl: track.thumbnail,
+      playing: true
+    });
+  }
+
+  startWatchdog(volume01);
   return !audio.paused;
 }
 
-/** Alias used by older call sites. */
+export async function keepLockedInRadioAlive(volume01 = 0.85): Promise<boolean> {
+  if (!radioIntentPlaying) return false;
+  const audio = getLeaflockMobileAudio();
+  if (audio && !audio.paused && !audio.ended && !audio.error && audio.dataset.leaflockMode === "live-radio") {
+    return true;
+  }
+  return startLockedInRadio({ volume01, forceReload: true });
+}
+
+export async function chainNextRadioTrack(volume01 = 0.85): Promise<boolean> {
+  if (!radioIntentPlaying) return false;
+  if (chainBusy) return false;
+  chainBusy = true;
+  try {
+    // Small delay so station API can advance past the finished track
+    await new Promise((r) => window.setTimeout(r, 350));
+    return await startLockedInRadio({
+      volume01,
+      forceReload: true,
+      offsetSeconds: 0
+    });
+  } finally {
+    chainBusy = false;
+  }
+}
+
+/** Alias */
 export function startLiveRadioAudio(volume01 = 0.85): void {
   void startLockedInRadio({ volume01, forceReload: true });
 }
 
 export async function resumeLiveRadioAudio(volume01 = 0.85): Promise<boolean> {
-  try {
-    const audio = getLeaflockMobileAudio();
-    if (!audio) return false;
-    hardenAudioEl(audio);
-    audio.muted = false;
-    if (audio.dataset.leaflockMode === "live-radio") {
-      audio.volume = Math.min(1, Math.max(0.35, volume01));
-    } else {
+  if (!radioIntentPlaying && getLeaflockMobileAudio()?.dataset.leaflockMode !== "live-radio") {
+    // private jukebox host path
+    try {
+      const audio = getLeaflockMobileAudio();
+      if (!audio) return false;
       audio.volume = Math.min(HOST_VOLUME, Math.max(0.001, volume01));
+      if (audio.paused) await audio.play();
+      return !audio.paused;
+    } catch {
+      return false;
     }
-    if (audio.paused || audio.ended) {
-      if (audio.ended || audio.error) {
-        return startLockedInRadio({ volume01, forceReload: true });
-      }
-      try {
-        await audio.play();
-      } catch {
-        return false;
-      }
-    }
-    return !audio.paused;
-  } catch {
-    return false;
   }
+  radioIntentPlaying = true;
+  const audio = getLeaflockMobileAudio();
+  if (audio && audio.dataset.leaflockMode === "live-radio" && !audio.ended && !audio.error) {
+    audio.volume = Math.min(1, Math.max(0.4, volume01));
+    try {
+      if (audio.paused) await audio.play();
+      if (!audio.paused) {
+        startWatchdog(volume01);
+        return true;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return startLockedInRadio({ volume01, forceReload: true });
 }
 
 /**
- * DJ-style crossfade into the next Locked In Radio load (new /live.mp3).
- * Uses dual permanent audio elements so background continues.
+ * Crossfade into the next radio track (dual HTML audio).
  */
 export async function crossfadeLockedInRadio(
   volume01 = 0.85,
   offsetSeconds = 0
 ): Promise<boolean> {
+  if (!radioIntentPlaying) radioIntentPlaying = true;
   const outgoing = getLeaflockMobileAudio();
   const incoming = getBlendAudio();
   if (!outgoing || !incoming) {
     return startLockedInRadio({ volume01, forceReload: true, offsetSeconds });
   }
 
+  const track = await fetchRadioTrack();
+  if (!track?.url) {
+    return startLockedInRadio({ volume01, forceReload: true, offsetSeconds });
+  }
+
   hardenAudioEl(incoming);
+  bindRadioElementGuards(outgoing, volume01);
   incoming.dataset.leaflockMode = "live-radio";
   incoming.loop = false;
   incoming.muted = false;
   incoming.volume = 0;
-  incoming.src = liveStreamUrl(true);
+  incoming.dataset.videoId = track.videoId || "";
+  incoming.src = track.url;
   try {
     incoming.load();
     await incoming.play();
@@ -224,21 +420,21 @@ export async function crossfadeLockedInRadio(
     return startLockedInRadio({ volume01, forceReload: true, offsetSeconds });
   }
 
-  if (offsetSeconds > 1) {
+  const seekTo = offsetSeconds > 1 ? offsetSeconds : 0;
+  if (seekTo > 1) {
     try {
-      incoming.currentTime = offsetSeconds;
+      incoming.currentTime = seekTo;
     } catch {
       // ignore
     }
   }
 
   const start = performance.now();
-  const master = Math.min(1, Math.max(0.35, volume01));
+  const master = Math.min(1, Math.max(0.4, volume01));
 
   return new Promise((resolve) => {
     const step = (now: number) => {
       const t = Math.min(1, (now - start) / BLEND_MS);
-      // Equal-power-ish curve
       const outGain = Math.cos(t * Math.PI * 0.5);
       const inGain = Math.sin(t * Math.PI * 0.5);
       try {
@@ -253,37 +449,52 @@ export async function crossfadeLockedInRadio(
       }
       try {
         outgoing.pause();
-        outgoing.removeAttribute("src");
-        outgoing.load();
       } catch {
         // ignore
       }
-      // Promote B → A by swapping src into primary element for Media Session identity.
+      // Promote B → A without tearing down the playing buffer when possible
       try {
         outgoing.dataset.leaflockMode = "live-radio";
+        outgoing.dataset.videoId = incoming.dataset.videoId || "";
         outgoing.loop = false;
         outgoing.src = incoming.src;
-        outgoing.currentTime = incoming.currentTime;
+        try {
+          outgoing.currentTime = incoming.currentTime;
+        } catch {
+          // ignore
+        }
         outgoing.volume = master;
         void outgoing.play().catch(() => undefined);
         incoming.pause();
         incoming.volume = 0;
       } catch {
-        // keep B playing if swap fails
         incoming.volume = master;
       }
+      if (track.title) {
+        updateLockedInRadioMetadata({
+          title: track.title,
+          artist: track.artist || LOCKED_IN_RADIO_STATION,
+          artworkUrl: track.thumbnail,
+          playing: true
+        });
+      }
+      startWatchdog(volume01);
       resolve(true);
     };
     requestAnimationFrame(step);
   });
 }
 
-/** When current track ends, load the next station song on the same mount path. */
 export function advanceLiveRadioToNextTrack(volume01 = 0.85): void {
-  void startLockedInRadio({ volume01, forceReload: true, offsetSeconds: 0 });
+  void chainNextRadioTrack(volume01);
 }
 
 export function pauseLiveRadioAudio(): void {
+  radioIntentPlaying = false;
+  if (watchdogTimer !== null) {
+    window.clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
   try {
     getLeaflockMobileAudio()?.pause();
     getBlendAudio()?.pause();
@@ -311,8 +522,9 @@ export function isLiveRadioPlaying(): boolean {
   const audio = getLeaflockMobileAudio();
   const b = getBlendAudio();
   return Boolean(
-    (audio && !audio.paused && audio.dataset.leaflockMode === "live-radio") ||
-      (b && !b.paused && b.dataset.leaflockMode === "live-radio")
+    radioIntentPlaying &&
+      ((audio && !audio.paused && audio.dataset.leaflockMode === "live-radio") ||
+        (b && !b.paused && b.dataset.leaflockMode === "live-radio"))
   );
 }
 
@@ -330,23 +542,9 @@ export async function probeLiveAudioMode(): Promise<LiveAudioMode> {
   }
 }
 
-/** HEAD /live.mp3 to see if the mount has real music (not silent). */
 export async function probeLiveMountHasMusic(): Promise<boolean> {
-  try {
-    const response = await fetch(`${LIVE_RADIO_STREAM_PATH}?probe=${Date.now()}`, {
-      method: "GET",
-      headers: { Range: "bytes=0-2047" },
-      cache: "no-store"
-    });
-    const source = (response.headers.get("X-LeafLock-Audio-Source") || "").toLowerCase();
-    if (source === "silent" || source === "hold") return false;
-    if (source === "stream" || source === "radio" || source === "dj420-track") return true;
-    // If we got audio bytes and not a tiny silent file, treat as music.
-    const len = Number(response.headers.get("content-length") || 0);
-    return response.ok && (len === 0 || len > 50_000 || response.status === 206);
-  } catch {
-    return false;
-  }
+  const track = await fetchRadioTrack();
+  return Boolean(track?.url);
 }
 
 export function kickPrivateJukeboxHold(): void {
@@ -385,7 +583,6 @@ export function ensureLiveRadioSource(): HTMLAudioElement | null {
 export function ensureMobileAudioContext(): void {}
 export function stopMobileAudioContext(): void {}
 
-/** Bind Media Session for Locked In Radio (lock screen / pull-down). */
 export function bindLockedInRadioMediaSession(handlers: {
   play: () => void;
   pause: () => void;

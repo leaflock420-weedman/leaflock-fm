@@ -3,13 +3,6 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/**
- * Status for LeafLock Locked In Radio mount (/live.mp3).
- * source=stream → continuous Icecast/Liquidsoap
- * source=radio  → current station track audio via /live.mp3 (background-capable)
- * source=silent → no music on the mount yet
- */
-
 function isSelfUrl(url: string): boolean {
   try {
     const u = new URL(url);
@@ -58,7 +51,7 @@ export async function GET() {
         });
       }
     } catch {
-      // try next
+      // next
     }
   }
 
@@ -68,16 +61,16 @@ export async function GET() {
       source: "silent",
       station: "LeafLock Locked In Radio",
       mount: "https://fm.leaflock.com.au/live.mp3",
-      note: "Track audio disabled. Set DJ420_UPSTREAM_URL for continuous encoder."
+      note: "Track audio disabled."
     });
   }
 
-  // Track proxy is the default Locked In Radio path (HTML audio survives exit).
   return NextResponse.json({
     ok: true,
     source: "radio",
     station: "LeafLock Locked In Radio",
     mount: "https://fm.leaflock.com.au/live.mp3",
-    note: "Live room plays /live.mp3 (current station track). Continues after you leave the app."
+    radioUrl: "/api/fm/radio-url",
+    note: "Direct CDN audio via /api/fm/radio-url — continues after you leave the app."
   });
 }

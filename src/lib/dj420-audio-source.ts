@@ -11,11 +11,26 @@ type CachedUrl = {
 };
 
 const urlCache = new Map<string, CachedUrl>();
-const CACHE_MS = 2.5 * 60 * 60 * 1000;
+/** googlevideo URLs die; refresh before expiry. */
+const CACHE_MS = 90 * 60 * 1000;
 let ensureBinPromise: Promise<string | null> | null = null;
-/** Serialize yt-dlp so Render starter never runs many processes (OOM). */
 let resolveChain: Promise<unknown> = Promise.resolve();
 const inflightResolves = new Map<string, Promise<CachedUrl | null>>();
+
+const PIPED_INSTANCES = [
+  process.env.PIPED_API_URL,
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://api.piped.private.coffee",
+  "https://pipedapi.nosebs.ru"
+].filter((v): v is string => Boolean(v && v.trim()));
+
+const INVIDIOUS_INSTANCES = [
+  process.env.INVIDIOUS_API_URL,
+  "https://yewtu.be",
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de"
+].filter((v): v is string => Boolean(v && v.trim()));
 
 function candidateBins(): string[] {
   const name = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
@@ -77,6 +92,7 @@ function downloadYtDlp(dest: string): Promise<void> {
 }
 
 async function ensureYtDlpBinary(): Promise<string | null> {
+  if (process.env.DJ420_ENABLE_YTDLP !== "1") return null;
   if (ensureBinPromise) return ensureBinPromise;
   ensureBinPromise = (async () => {
     for (const bin of candidateBins()) {
@@ -88,7 +104,6 @@ async function ensureYtDlpBinary(): Promise<string | null> {
         // continue
       }
     }
-
     const dest = path.join(
       process.cwd(),
       "bin",
@@ -105,7 +120,7 @@ async function ensureYtDlpBinary(): Promise<string | null> {
   return ensureBinPromise;
 }
 
-function runProcess(command: string, args: string[], timeoutMs = 50000): Promise<string> {
+function runProcess(command: string, args: string[], timeoutMs = 35000): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       windowsHide: true,
@@ -136,71 +151,168 @@ function runProcess(command: string, args: string[], timeoutMs = 50000): Promise
   });
 }
 
-function cookiesArgs(): string[] {
-  // Optional Netscape cookies file content in env (base64 or raw).
-  // Set YTDLP_COOKIES or YTDLP_COOKIES_FILE on Render to bypass bot checks.
-  const filePath = process.env.YTDLP_COOKIES_FILE;
-  if (filePath && fs.existsSync(filePath)) {
-    return ["--cookies", filePath];
+function contentTypeFromUrl(url: string): string {
+  if (url.includes("mime=audio%2Fmp4") || url.includes("itag=140") || url.includes(".m4a")) {
+    return "audio/mp4";
   }
+  if (url.includes("webm") || url.includes("mime=audio%2Fwebm")) return "audio/webm";
+  if (url.includes("mpeg") || url.includes("mp3")) return "audio/mpeg";
+  return "audio/mp4";
+}
 
-  const raw = process.env.YTDLP_COOKIES;
-  if (!raw?.trim()) return [];
-
-  try {
-    const cookiesPath = path.join(process.cwd(), "bin", "youtube.cookies.txt");
-    fs.mkdirSync(path.dirname(cookiesPath), { recursive: true });
-    const body = raw.includes("\t") || raw.includes("# Netscape")
-      ? raw
-      : Buffer.from(raw, "base64").toString("utf8");
-    fs.writeFileSync(cookiesPath, body, "utf8");
-    return ["--cookies", cookiesPath];
-  } catch {
-    return [];
+/** Lightweight — no binary, low memory. Public Piped APIs. */
+async function resolveViaPiped(videoId: string): Promise<string | null> {
+  for (const base of PIPED_INSTANCES) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 9000);
+      const res = await fetch(`${base.replace(/\/$/, "")}/streams/${videoId}`, {
+        headers: { "User-Agent": "LeafLockFM/1.0 LockedInRadio", Accept: "application/json" },
+        cache: "no-store",
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = (await res.json()) as {
+        audioStreams?: Array<{ url?: string; bitrate?: number; mimeType?: string }>;
+      };
+      const streams = [...(data.audioStreams ?? [])].filter((s) => s.url?.startsWith("http"));
+      if (!streams.length) continue;
+      streams.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+      // Prefer m4a/mp4 for broad mobile support
+      const preferred =
+        streams.find((s) => (s.mimeType || "").includes("mp4") || (s.mimeType || "").includes("m4a")) ||
+        streams[0];
+      if (preferred?.url) return preferred.url;
+    } catch {
+      // try next instance
+    }
   }
+  return null;
+}
+
+async function resolveViaInvidious(videoId: string): Promise<string | null> {
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 9000);
+      const res = await fetch(
+        `${base.replace(/\/$/, "")}/api/v1/videos/${videoId}?fields=adaptiveFormats,formatStreams`,
+        {
+          headers: { "User-Agent": "LeafLockFM/1.0 LockedInRadio", Accept: "application/json" },
+          cache: "no-store",
+          signal: controller.signal
+        }
+      );
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = (await res.json()) as {
+        adaptiveFormats?: Array<{ url?: string; type?: string; bitrate?: string | number }>;
+      };
+      const audio = (data.adaptiveFormats ?? [])
+        .filter((f) => f.url && (f.type || "").startsWith("audio/"))
+        .sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0));
+      if (audio[0]?.url) return audio[0].url;
+    } catch {
+      // next
+    }
+  }
+  return null;
 }
 
 async function resolveWithYtDlp(videoId: string): Promise<string> {
   const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const cookieFlags = cookiesArgs();
-
-  // Prefer light clients first; stop after first success (less CPU/RAM on Render).
-  const clientVariants = [
-    "youtube:player_client=tv_embedded",
-    "youtube:player_client=android",
-    "youtube:player_client=ios"
-  ];
-
   const bin = await ensureYtDlpBinary();
-  const runners: Array<(args: string[]) => Promise<string>> = [];
-  if (bin) runners.push((args) => runProcess(bin, args, 35_000));
-  runners.push((args) => runProcess("yt-dlp", args, 35_000));
+  if (!bin) throw new Error("yt-dlp disabled");
 
+  const clients = [
+    "youtube:player_client=tv_embedded",
+    "youtube:player_client=android"
+  ];
   let lastError: unknown;
-  for (const clientArg of clientVariants) {
-    const args = [
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-      "-g",
-      "--no-playlist",
-      "--no-warnings",
-      "--no-check-certificates",
-      "--extractor-args",
-      clientArg,
-      ...cookieFlags,
-      pageUrl
-    ];
-    for (const run of runners) {
-      try {
-        const out = await run(args);
-        const url = out.split(/\r?\n/).filter(Boolean).pop();
-        if (url?.startsWith("http")) return url;
-      } catch (error) {
-        lastError = error;
-      }
+  for (const clientArg of clients) {
+    try {
+      const out = await runProcess(
+        bin,
+        [
+          "-f",
+          "bestaudio[ext=m4a]/bestaudio/best",
+          "-g",
+          "--no-playlist",
+          "--no-warnings",
+          "--extractor-args",
+          clientArg,
+          pageUrl
+        ],
+        30_000
+      );
+      const url = out.split(/\r?\n/).filter(Boolean).pop();
+      if (url?.startsWith("http")) return url;
+    } catch (error) {
+      lastError = error;
     }
   }
   throw lastError || new Error("yt-dlp failed");
+}
+
+/** Pure JS — no child process. Uses package already in package.json. */
+async function resolveViaYtdlCore(videoId: string): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ytdl = require("@distube/ytdl-core") as {
+      getInfo: (
+        url: string,
+        opts?: { playerClients?: string[] }
+      ) => Promise<{ formats: Array<Record<string, unknown>> }>;
+      filterFormats: (
+        formats: Array<Record<string, unknown>>,
+        filter: string
+      ) => Array<Record<string, unknown>>;
+    };
+    const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
+      playerClients: ["ANDROID", "IOS", "TV"]
+    });
+    const audio = ytdl.filterFormats(info.formats, "audioonly");
+    if (!audio.length) return null;
+    audio.sort(
+      (a, b) => Number(b.audioBitrate || b.bitrate || 0) - Number(a.audioBitrate || a.bitrate || 0)
+    );
+    // Prefer mp4/m4a for Safari / iOS
+    const preferred =
+      audio.find((f) => String(f.mimeType || f.container || "").includes("mp4")) ||
+      audio.find((f) => String(f.mimeType || "").includes("m4a")) ||
+      audio[0];
+    const url = preferred?.url;
+    return typeof url === "string" && url.startsWith("http") ? url : null;
+  } catch (error) {
+    console.error("[dj420-audio] ytdl-core failed", videoId, error);
+    return null;
+  }
+}
+
+async function resolveAudioUrlOnce(videoId: string): Promise<string | null> {
+  // 1) ytdl-core in-process (no spawn → no OOM from yt-dlp processes)
+  const core = await resolveViaYtdlCore(videoId);
+  if (core) return core;
+
+  // 2) Piped public APIs
+  const piped = await resolveViaPiped(videoId);
+  if (piped) return piped;
+
+  // 3) Invidious
+  const inv = await resolveViaInvidious(videoId);
+  if (inv) return inv;
+
+  // 4) yt-dlp binary only if explicitly enabled
+  if (process.env.DJ420_ENABLE_YTDLP === "1") {
+    try {
+      return await resolveWithYtDlp(videoId);
+    } catch (error) {
+      console.error("[dj420-audio] yt-dlp failed", videoId, error);
+    }
+  }
+
+  return null;
 }
 
 export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl | null> {
@@ -213,7 +325,6 @@ export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl
   if (existing) return existing;
 
   const job = (async () => {
-    // Global queue: never run parallel yt-dlp on the web dyno.
     const prev = resolveChain;
     let release!: () => void;
     resolveChain = new Promise<void>((r) => {
@@ -222,17 +333,11 @@ export async function resolveYoutubeAudioUrl(videoId: string): Promise<CachedUrl
     await prev.catch(() => undefined);
 
     try {
-      const url = await resolveWithYtDlp(videoId);
-      const contentType =
-        url.includes("mime=audio%2Fmp4") || url.includes("itag=140")
-          ? "audio/mp4"
-          : url.includes("webm")
-            ? "audio/webm"
-            : "audio/mp4";
-
+      const url = await resolveAudioUrlOnce(videoId);
+      if (!url) return null;
       const entry: CachedUrl = {
         url,
-        contentType,
+        contentType: contentTypeFromUrl(url),
         expiresAt: Date.now() + CACHE_MS
       };
       urlCache.set(videoId, entry);
@@ -259,6 +364,7 @@ export type LiveTrackAudio = {
   audioUrl: string;
   contentType: string;
   revision: number;
+  thumbnail?: string | null;
 };
 
 export async function getCurrentLiveTrackAudio(): Promise<LiveTrackAudio | null> {
@@ -277,12 +383,71 @@ export async function getCurrentLiveTrackAudio(): Promise<LiveTrackAudio | null>
     durationSec: nowPlaying.durationSec || 240,
     audioUrl: resolved.url,
     contentType: resolved.contentType,
-    revision: nowPlaying.revision
+    revision: nowPlaying.revision,
+    thumbnail: nowPlaying.thumbnail
   };
 }
 
-export async function proxyCurrentTrackResponse(request?: Request): Promise<Response> {
+/**
+ * Prefer 302 redirect so Render never proxies multi‑MB audio (timeouts = stream stops).
+ * Proxy only when DJ420_FORCE_PROXY=1.
+ */
+export async function serveCurrentTrackForMount(request?: Request): Promise<Response> {
   const track = await getCurrentLiveTrackAudio();
+  if (!track) {
+    return new Response("DJ420 track unavailable", { status: 503 });
+  }
+
+  const forceProxy = process.env.DJ420_FORCE_PROXY === "1";
+  const wantsJson = request?.headers.get("accept")?.includes("application/json");
+
+  if (wantsJson) {
+    return Response.json({
+      ok: true,
+      source: "radio",
+      station: "LeafLock Locked In Radio",
+      mount: "https://fm.leaflock.com.au/live.mp3",
+      videoId: track.videoId,
+      title: track.title,
+      artist: track.artist,
+      offsetSeconds: track.offsetSeconds,
+      durationSec: track.durationSec,
+      revision: track.revision,
+      contentType: track.contentType,
+      url: track.audioUrl,
+      thumbnail: track.thumbnail
+    });
+  }
+
+  // Default: redirect client browser straight to the CDN audio URL.
+  // HTML <audio> follows this and keeps playing after you leave Chrome.
+  if (!forceProxy) {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: track.audioUrl,
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+        "X-LeafLock-Audio-Source": "radio-redirect",
+        "X-LeafLock-Station": "LeafLock Locked In Radio",
+        "X-LeafLock-Mount": "https://fm.leaflock.com.au/live.mp3",
+        "X-LeafLock-Video-Id": track.videoId,
+        "X-LeafLock-Title": encodeURIComponent(track.title),
+        "X-LeafLock-Offset": String(Math.floor(track.offsetSeconds)),
+        "X-LeafLock-Duration": String(Math.floor(track.durationSec)),
+        "X-LeafLock-Revision": String(track.revision)
+      }
+    });
+  }
+
+  return proxyCurrentTrackResponse(request, track);
+}
+
+export async function proxyCurrentTrackResponse(
+  request?: Request,
+  preloaded?: LiveTrackAudio
+): Promise<Response> {
+  const track = preloaded ?? (await getCurrentLiveTrackAudio());
   if (!track) {
     return new Response("DJ420 track unavailable", { status: 503 });
   }

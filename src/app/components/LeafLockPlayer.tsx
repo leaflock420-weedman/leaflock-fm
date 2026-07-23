@@ -36,8 +36,10 @@ import {
   crossfadeLockedInRadio,
   ensureLiveRadioSource,
   ensureMobileBackgroundAudio,
+  getLastRadioMeta,
   getLeaflockMobileAudio,
   isLiveRadioPlaying,
+  keepLockedInRadioAlive,
   kickPrivateJukeboxHold,
   LOCKED_IN_RADIO_STATION,
   pauseLiveRadioAudio,
@@ -1545,8 +1547,8 @@ export default function LeafLockPlayer({
     applyLiveStationTrackRef.current = applyLiveStationTrack;
   }, [applyLiveStationTrack]);
 
-  // Locked In Radio: permanent <audio> keeps playing after soft-switch / lock.
-  // On track end → load next station song on the same /live.mp3 mount.
+  // Locked In Radio: never intentionally pause on hide. Watchdog in leaflock-mobile-audio
+  // force-resumes. We only sync UI + metadata + station timeline here.
 
   useEffect(() => {
     ensureLiveRadioSource();
@@ -1563,19 +1565,19 @@ export default function LeafLockPlayer({
       }
       liveUsesStreamRef.current = true;
       muteYouTubeDecks();
-      void resumeLiveRadioAudio(vol());
+      void keepLockedInRadioAlive(vol());
       bindMediaSessionRef.current();
       updateMediaSessionRef.current(true);
       void acquireLeaflockWakeLock();
-    };
-
-    const onPause = () => {
-      if (userPlaybackIntentRef.current !== "playing") return;
-      if (listenModeRef.current !== "live") return;
-      window.setTimeout(() => {
-        if (userPlaybackIntentRef.current !== "playing") return;
-        reassertRadio();
-      }, 80);
+      const meta = getLastRadioMeta();
+      if (meta?.title) {
+        updateLockedInRadioMetadata({
+          title: meta.title,
+          artist: meta.artist || LOCKED_IN_RADIO_STATION,
+          artworkUrl: meta.thumbnail,
+          playing: true
+        });
+      }
     };
 
     const onPlaying = () => {
@@ -1592,7 +1594,6 @@ export default function LeafLockPlayer({
     const onEnded = () => {
       if (userPlaybackIntentRef.current !== "playing") return;
       if (listenModeRef.current !== "live") return;
-      // Next station track on the same mount (continues in background).
       advanceLiveRadioToNextTrack(vol());
       void fetchLiveStation()
         .then((station) => {
@@ -1604,44 +1605,19 @@ export default function LeafLockPlayer({
         .catch(() => undefined);
     };
 
-    const onVisibility = () => {
-      if (userPlaybackIntentRef.current !== "playing") return;
-      reassertRadio();
-    };
-
-    audio.addEventListener("pause", onPause);
+    // Do NOT listen for pause → that was fighting the radio engine.
     audio.addEventListener("playing", onPlaying);
     audio.addEventListener("ended", onEnded);
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener("visibilitychange", reassertRadio);
     window.addEventListener("pageshow", reassertRadio);
     window.addEventListener("focus", reassertRadio);
 
-    const keepAliveId = window.setInterval(() => {
-      if (userPlaybackIntentRef.current !== "playing") return;
-      if (listenModeRef.current !== "live") return;
-      if (audio.paused || audio.ended) {
-        void resumeLiveRadioAudio(vol());
-        if (audio.ended || audio.error) {
-          advanceLiveRadioToNextTrack(vol());
-        }
-      }
-      if ("mediaSession" in navigator) {
-        try {
-          navigator.mediaSession.playbackState = "playing";
-        } catch {
-          // ignore
-        }
-      }
-    }, 5000);
-
     return () => {
-      audio.removeEventListener("pause", onPause);
       audio.removeEventListener("playing", onPlaying);
       audio.removeEventListener("ended", onEnded);
-      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("visibilitychange", reassertRadio);
       window.removeEventListener("pageshow", reassertRadio);
       window.removeEventListener("focus", reassertRadio);
-      window.clearInterval(keepAliveId);
     };
   }, [muteYouTubeDecks]);
 
