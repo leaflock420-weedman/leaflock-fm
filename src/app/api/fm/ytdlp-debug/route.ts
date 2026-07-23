@@ -57,10 +57,12 @@ export async function GET() {
   const probe = binInfo.exists
     ? await run(bin, [
         "-f",
-        "bestaudio[ext=m4a]/bestaudio",
+        "bestaudio[ext=m4a]/bestaudio/best",
         "-g",
         "--no-playlist",
         "--no-warnings",
+        "--extractor-args",
+        "youtube:player_client=tv_embedded",
         `https://www.youtube.com/watch?v=${videoId}`
       ])
     : { code: -3, out: "", err: "binary missing" };

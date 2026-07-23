@@ -135,23 +135,21 @@ function runProcess(command: string, args: string[], timeoutMs = 50000): Promise
 
 async function resolveWithYtDlp(videoId: string): Promise<string> {
   const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const args = [
-    "-f",
-    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-    "-g",
-    "--no-playlist",
-    "--no-warnings",
-    pageUrl
+
+  // Render / datacenter IPs often hit "sign in to confirm you're not a bot"
+  // with the default web client. tv_embedded / android_vr work without cookies.
+  const clientVariants = [
+    "youtube:player_client=tv_embedded",
+    "youtube:player_client=android_vr",
+    "youtube:player_client=web_embedded",
+    "youtube:player_client=ios"
   ];
 
   const bin = await ensureYtDlpBinary();
-  const attempts: Array<() => Promise<string>> = [];
-
-  if (bin) {
-    attempts.push(() => runProcess(bin, args));
-  }
-  attempts.push(() => runProcess("yt-dlp", args));
-  attempts.push(() =>
+  const runners: Array<(args: string[]) => Promise<string>> = [];
+  if (bin) runners.push((args) => runProcess(bin, args));
+  runners.push((args) => runProcess("yt-dlp", args));
+  runners.push((args) =>
     runProcess(process.platform === "win32" ? "python" : "python3", [
       "-m",
       "yt_dlp",
@@ -160,13 +158,25 @@ async function resolveWithYtDlp(videoId: string): Promise<string> {
   );
 
   let lastError: unknown;
-  for (const attempt of attempts) {
-    try {
-      const out = await attempt();
-      const url = out.split(/\r?\n/).filter(Boolean).pop();
-      if (url?.startsWith("http")) return url;
-    } catch (error) {
-      lastError = error;
+  for (const clientArg of clientVariants) {
+    const args = [
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+      "-g",
+      "--no-playlist",
+      "--no-warnings",
+      "--extractor-args",
+      clientArg,
+      pageUrl
+    ];
+    for (const run of runners) {
+      try {
+        const out = await run(args);
+        const url = out.split(/\r?\n/).filter(Boolean).pop();
+        if (url?.startsWith("http")) return url;
+      } catch (error) {
+        lastError = error;
+      }
     }
   }
   throw lastError || new Error("yt-dlp failed");

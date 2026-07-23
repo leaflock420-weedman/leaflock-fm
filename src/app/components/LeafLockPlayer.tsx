@@ -1968,9 +1968,8 @@ export default function LeafLockPlayer({
 
   const togglePlay = () => {
     // —— LIVE RADIO ——
-    // Primary path: permanent https://fm.leaflock.com.au/live.mp3 (DJ420 track audio).
-    // This is real HTML5 audio → keeps playing after leaving Chrome.
-    // Fallback: YouTube only if /live.mp3 cannot resolve track audio.
+    // ONLY permanent HTML audio at /live.mp3 (real track audio from DJ420).
+    // YouTube stays muted — it cannot survive leaving Chrome.
     if (listenModeRef.current === "live") {
       if (isPlaying) {
         userPlaybackIntentRef.current = "paused";
@@ -1996,9 +1995,9 @@ export default function LeafLockPlayer({
       setPlaybackError(null);
       setIsBuffering(true);
 
-      const vol = Math.max(0.5, volumeRef.current / 100);
+      const vol = Math.max(0.55, volumeRef.current / 100);
 
-      // User gesture: start /live.mp3 immediately at full volume.
+      // User gesture → permanent /live.mp3 at full volume (background-capable).
       liveUsesStreamRef.current = true;
       startLiveRadioAudio(vol);
       muteYouTubeDecks();
@@ -2010,48 +2009,30 @@ export default function LeafLockPlayer({
 
       void (async () => {
         try {
-          const [station, mode] = await Promise.all([
-            fetchLiveStation(),
-            probeLiveAudioMode()
-          ]);
+          const station = await fetchLiveStation();
           if (userPlaybackIntentRef.current !== "playing") return;
 
-          // Metadata for lock-screen title/art (YouTube video optional, muted).
+          // Lock-screen metadata + optional muted video cue only.
           applyLiveStationTrackRef.current(station, {
             forceReload: true,
             resumePlayback: false,
             initialCue: true
           });
           muteYouTubeDecks();
-
-          if (mode === "stream") {
-            liveUsesStreamRef.current = true;
-            setLiveRadioVolume(vol, false);
-            void resumeLiveRadioAudio(vol);
-            setIsBuffering(false);
-            updateMediaSessionRef.current(true);
-            startTimePollingRef.current();
+          setLiveRadioVolume(vol, false);
+          const ok = await resumeLiveRadioAudio(vol);
+          if (!ok) {
+            // Last resort if stream element failed to start.
+            liveUsesStreamRef.current = false;
+            await playLiveYouTube(station);
             return;
           }
-
-          // Resolver failed — fall back to YouTube so room is not silent.
-          liveUsesStreamRef.current = false;
-          setLiveRadioVolume(0.001, false);
-          await playLiveYouTube(station);
+          setIsBuffering(false);
+          updateMediaSessionRef.current(true);
+          startTimePollingRef.current();
         } catch {
-          liveUsesStreamRef.current = false;
-          try {
-            const station = await fetchLiveStation();
-            if (userPlaybackIntentRef.current === "playing") {
-              await playLiveYouTube(station);
-            }
-          } catch {
-            setIsBuffering(false);
-            setPlaybackError("Could not join the live room. Try again.");
-            isPlayingRef.current = false;
-            setIsPlaying(false);
-            pauseLiveRadioAudio();
-          }
+          setIsBuffering(false);
+          setPlaybackError("Could not start live audio. Try again.");
         }
       })();
       return;
