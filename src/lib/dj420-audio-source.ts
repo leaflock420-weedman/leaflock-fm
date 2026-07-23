@@ -133,16 +133,41 @@ function runProcess(command: string, args: string[], timeoutMs = 50000): Promise
   });
 }
 
+function cookiesArgs(): string[] {
+  // Optional Netscape cookies file content in env (base64 or raw).
+  // Set YTDLP_COOKIES or YTDLP_COOKIES_FILE on Render to bypass bot checks.
+  const filePath = process.env.YTDLP_COOKIES_FILE;
+  if (filePath && fs.existsSync(filePath)) {
+    return ["--cookies", filePath];
+  }
+
+  const raw = process.env.YTDLP_COOKIES;
+  if (!raw?.trim()) return [];
+
+  try {
+    const cookiesPath = path.join(process.cwd(), "bin", "youtube.cookies.txt");
+    fs.mkdirSync(path.dirname(cookiesPath), { recursive: true });
+    const body = raw.includes("\t") || raw.includes("# Netscape")
+      ? raw
+      : Buffer.from(raw, "base64").toString("utf8");
+    fs.writeFileSync(cookiesPath, body, "utf8");
+    return ["--cookies", cookiesPath];
+  } catch {
+    return [];
+  }
+}
+
 async function resolveWithYtDlp(videoId: string): Promise<string> {
   const pageUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const cookieFlags = cookiesArgs();
 
-  // Render / datacenter IPs often hit "sign in to confirm you're not a bot"
-  // with the default web client. tv_embedded / android_vr work without cookies.
+  // Render IPs often need cookies; try non-web clients first.
   const clientVariants = [
     "youtube:player_client=tv_embedded",
     "youtube:player_client=android_vr",
     "youtube:player_client=web_embedded",
-    "youtube:player_client=ios"
+    "youtube:player_client=ios",
+    "youtube:player_client=android"
   ];
 
   const bin = await ensureYtDlpBinary();
@@ -167,6 +192,7 @@ async function resolveWithYtDlp(videoId: string): Promise<string> {
       "--no-warnings",
       "--extractor-args",
       clientArg,
+      ...cookieFlags,
       pageUrl
     ];
     for (const run of runners) {

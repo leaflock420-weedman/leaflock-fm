@@ -1968,8 +1968,9 @@ export default function LeafLockPlayer({
 
   const togglePlay = () => {
     // —— LIVE RADIO ——
-    // ONLY permanent HTML audio at /live.mp3 (real track audio from DJ420).
-    // YouTube stays muted — it cannot survive leaving Chrome.
+    // Real background music = /live.mp3 only when status.source === "stream"
+    // (DJ420 track audio or Icecast). Hold pad is NEVER used as the song.
+    // If stream is hold/offline → YouTube for music (foreground).
     if (listenModeRef.current === "live") {
       if (isPlaying) {
         userPlaybackIntentRef.current = "paused";
@@ -1996,11 +1997,6 @@ export default function LeafLockPlayer({
       setIsBuffering(true);
 
       const vol = Math.max(0.55, volumeRef.current / 100);
-
-      // User gesture → permanent /live.mp3 at full volume (background-capable).
-      liveUsesStreamRef.current = true;
-      startLiveRadioAudio(vol);
-      muteYouTubeDecks();
       bindMediaSessionRef.current();
       isPlayingRef.current = true;
       setIsPlaying(true);
@@ -2009,30 +2005,52 @@ export default function LeafLockPlayer({
 
       void (async () => {
         try {
-          const station = await fetchLiveStation();
+          const [station, mode] = await Promise.all([
+            fetchLiveStation(),
+            probeLiveAudioMode()
+          ]);
           if (userPlaybackIntentRef.current !== "playing") return;
 
-          // Lock-screen metadata + optional muted video cue only.
-          applyLiveStationTrackRef.current(station, {
-            forceReload: true,
-            resumePlayback: false,
-            initialCue: true
-          });
-          muteYouTubeDecks();
-          setLiveRadioVolume(vol, false);
-          const ok = await resumeLiveRadioAudio(vol);
-          if (!ok) {
-            // Last resort if stream element failed to start.
-            liveUsesStreamRef.current = false;
-            await playLiveYouTube(station);
+          if (mode === "stream") {
+            // Real continuous track audio on /live.mp3 → survives leaving Chrome.
+            liveUsesStreamRef.current = true;
+            startLiveRadioAudio(vol);
+            muteYouTubeDecks();
+            applyLiveStationTrackRef.current(station, {
+              forceReload: true,
+              resumePlayback: false,
+              initialCue: true
+            });
+            setLiveRadioVolume(vol, false);
+            void resumeLiveRadioAudio(vol);
+            setIsBuffering(false);
+            updateMediaSessionRef.current(true);
+            startTimePollingRef.current();
             return;
           }
-          setIsBuffering(false);
-          updateMediaSessionRef.current(true);
-          startTimePollingRef.current();
+
+          // /live.mp3 is only hold (soft pad) — do NOT play it as music.
+          // YouTube plays the songs. Soft host stays inaudible for Media Session.
+          liveUsesStreamRef.current = false;
+          startLiveRadioAudio(0.001);
+          setLiveRadioVolume(0.001, false);
+          await playLiveYouTube(station);
         } catch {
-          setIsBuffering(false);
-          setPlaybackError("Could not start live audio. Try again.");
+          liveUsesStreamRef.current = false;
+          try {
+            const station = await fetchLiveStation();
+            if (userPlaybackIntentRef.current === "playing") {
+              startLiveRadioAudio(0.001);
+              setLiveRadioVolume(0.001, false);
+              await playLiveYouTube(station);
+            }
+          } catch {
+            setIsBuffering(false);
+            setPlaybackError("Could not start live audio. Try again.");
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            pauseLiveRadioAudio();
+          }
         }
       })();
       return;
