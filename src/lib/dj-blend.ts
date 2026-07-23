@@ -1,14 +1,15 @@
-/** Soft lead-in before the equal-power crossfade. */
-export const DEFAULT_PRE_ROLL_MS = 800;
-/** Main DJ crossfade length (~8s = solid 5–10s blend). */
-export const DEFAULT_BLEND_DURATION_MS = 8000;
-/** Start preparing the next deck this many seconds before track end. */
-export const DEFAULT_BLEND_LEAD_SEC = 12;
-export const BLEND_POLL_INTERVAL_MS = 250;
+/** Soft lead-in before the equal-power crossfade (incoming ghosted under outgoing). */
+export const DEFAULT_PRE_ROLL_MS = 1200;
+/** Main DJ equal-power crossfade (~7s of real blend after pre-roll ≈ 8–9s total). */
+export const DEFAULT_BLEND_DURATION_MS = 7500;
+/** Start dual-deck prep this many seconds before track end. */
+export const DEFAULT_BLEND_LEAD_SEC = 15;
+export const BLEND_POLL_INTERVAL_MS = 200;
 export const TOTAL_BLEND_MS = DEFAULT_PRE_ROLL_MS + DEFAULT_BLEND_DURATION_MS;
 
 const PRE_ROLL_RATIO = DEFAULT_PRE_ROLL_MS / TOTAL_BLEND_MS;
-const INCOMING_FLOOR = 0.14;
+/** Incoming floor during pre-roll so the next track is audible under the outro. */
+const INCOMING_FLOOR = 0.18;
 
 function smoothstep(t: number): number {
   const clamped = Math.min(1, Math.max(0, t));

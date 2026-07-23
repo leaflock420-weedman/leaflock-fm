@@ -72,6 +72,13 @@ export default function FmListenMode() {
         // ignore
       }
       setLiveJoinNonce((n) => n + 1);
+      // CRITICAL: fire in the same user-gesture stack so Chrome allows autoplay.
+      // useEffect / await after click loses the gesture and forces a Play tap.
+      try {
+        window.dispatchEvent(new CustomEvent("leaflock-live-join", { detail: { gesture: true } }));
+      } catch {
+        // ignore
+      }
     }
     try {
       window.localStorage.setItem(MODE_KEY, next);
@@ -117,9 +124,11 @@ export default function FmListenMode() {
                 : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
             }`}
           >
-            <span className="block text-sm font-semibold">Join live room</span>
+            <span className="block text-sm font-semibold">
+              {mode === "live" ? "Join live room (tap to start)" : "Join live room"}
+            </span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Auto-plays in sync with everyone — DJ blend between songs.
+              Tap once — music starts in sync with everyone. DJ blend between songs.
             </span>
           </button>
           <button
