@@ -19,5 +19,3 @@ await mkdir(path.join(standalone, "data"), { recursive: true });
 await copyIfExists(path.join(root, "public"), path.join(standalone, "public"));
 await copyIfExists(path.join(root, ".next", "static"), path.join(standalone, ".next", "static"));
 await copyIfExists(path.join(root, "data"), path.join(standalone, "data"));
-// yt-dlp for DJ420 /live.mp3 track audio
-await copyIfExists(path.join(root, "bin"), path.join(standalone, "bin"));

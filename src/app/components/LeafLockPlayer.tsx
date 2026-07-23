@@ -32,7 +32,6 @@ import {
   type PlaylistVideo
 } from "@/lib/youtube-playlist";
 import {
-  advanceLiveRadioToNextTrack,
   ensureLiveRadioSource,
   ensureMobileBackgroundAudio,
   getLeaflockMobileAudio,
@@ -43,7 +42,8 @@ import {
   probeLiveAudioMode,
   resumeLiveRadioAudio,
   setLiveRadioVolume,
-  startLiveRadioAudio
+  startLiveRadioAudio,
+  startSilentMediaHost
 } from "@/lib/leaflock-mobile-audio";
 
 type PlayerInject = {
@@ -634,10 +634,10 @@ export default function LeafLockPlayer({
         return;
       }
 
-      kickPrivateJukeboxHold(0.08);
+      kickPrivateJukeboxHold();
       const local = mediaBridgeRef.current;
       if (local) {
-        local.volume = 0.08;
+        local.volume = 0.001;
         local.muted = false;
         void local.play().catch(() => undefined);
       }
@@ -1331,7 +1331,7 @@ export default function LeafLockPlayer({
   // Do not pause, stop, mute, destroy, unload or reset the live audio element.
 
   useEffect(() => {
-    ensureLiveRadioSource(false);
+    ensureLiveRadioSource();
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
 
@@ -1358,33 +1358,11 @@ export default function LeafLockPlayer({
       }
     };
 
-    // Track finished → load next DJ420 track from same /live.mp3 mount.
-    const onEnded = () => {
-      if (userPlaybackIntentRef.current !== "playing") return;
-      if (listenModeRef.current !== "live") return;
-      if (!liveUsesStreamRef.current) return;
-      advanceLiveRadioToNextTrack(volumeRef.current / 100 || 0.85);
-      // Refresh metadata for next song
-      void fetchLiveStation()
-        .then((station) => {
-          applyLiveStationTrackRef.current(station, {
-            forceReload: true,
-            resumePlayback: false,
-            initialCue: true
-          });
-          muteYouTubeDecks();
-          updateMediaSessionRef.current(true);
-        })
-        .catch(() => undefined);
-    };
-
     audio.addEventListener("pause", onPause);
     audio.addEventListener("playing", onPlaying);
-    audio.addEventListener("ended", onEnded);
     return () => {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("playing", onPlaying);
-      audio.removeEventListener("ended", onEnded);
     };
   }, [muteYouTubeDecks]);
 
@@ -1968,9 +1946,10 @@ export default function LeafLockPlayer({
 
   const togglePlay = () => {
     // —— LIVE RADIO ——
-    // YouTube is the default music path (works reliably).
-    // /live.mp3 is used only when it is a REAL stream (not the soft hold).
-    // Critical: start YouTube inside the SAME user-gesture stack (no await first).
+    // YouTube = music (reliable, low memory).
+    // Silent host = Media Session only (never audible soft tone).
+    // Real /live.mp3 Icecast only if DJ420_UPSTREAM_URL is set (optional upgrade).
+    // NEVER run yt-dlp on the web service (OOM-killed Render).
     if (listenModeRef.current === "live") {
       if (isPlaying) {
         userPlaybackIntentRef.current = "paused";
@@ -1997,11 +1976,8 @@ export default function LeafLockPlayer({
       setIsBuffering(true);
       liveUsesStreamRef.current = false;
 
-      const vol = Math.max(0.55, volumeRef.current / 100);
-
-      // 1) User-gesture sync: kick YouTube + silent media host immediately.
-      startLiveRadioAudio(0.001);
-      setLiveRadioVolume(0.001, false);
+      // User gesture: silent media host + YouTube music immediately.
+      startSilentMediaHost();
       try {
         const player = getActivePlayer();
         if (player && playersReady) {
@@ -2010,7 +1986,7 @@ export default function LeafLockPlayer({
           player.playVideo();
         }
       } catch {
-        // Player may still be loading — async path will retry.
+        // async path retries
       }
       bindMediaSessionRef.current();
       isPlayingRef.current = true;
@@ -2019,16 +1995,13 @@ export default function LeafLockPlayer({
       updateMediaSessionRef.current(true);
       startTimePolling();
 
-      // 2) Async: join station timeline + optional real /live.mp3 stream upgrade.
       void (async () => {
         try {
           const station = await fetchLiveStation();
           if (userPlaybackIntentRef.current !== "playing") return;
-
-          // Default: YouTube carries the live room songs.
           await playLiveYouTube(station);
 
-          // Upgrade only if /live.mp3 is real station audio (not hold).
+          // Optional: real Icecast only (never soft hold as music).
           const mode = await probeLiveAudioMode();
           if (userPlaybackIntentRef.current !== "playing") return;
           if (mode !== "stream") {
@@ -2036,6 +2009,7 @@ export default function LeafLockPlayer({
             return;
           }
 
+          const vol = Math.max(0.55, volumeRef.current / 100);
           liveUsesStreamRef.current = true;
           startLiveRadioAudio(vol);
           setLiveRadioVolume(vol, false);
@@ -2051,10 +2025,8 @@ export default function LeafLockPlayer({
           updateMediaSessionRef.current(true);
         } catch {
           setIsBuffering(false);
-          // Keep trying YouTube if station fetch failed once.
           try {
-            const player = getActivePlayer();
-            player?.playVideo();
+            getActivePlayer()?.playVideo();
             unmuteYouTubeDecks();
           } catch {
             setPlaybackError("Could not join the live room. Try again.");

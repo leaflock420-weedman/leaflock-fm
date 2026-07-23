@@ -4,8 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
-    "postinstall": "node scripts/install-ytdlp.mjs",
-    "build": "node scripts/install-ytdlp.mjs && node scripts/create-silent-audio.mjs && node scripts/make-logo-transparent.mjs && prisma generate && next build",
+    "build": "node scripts/create-silent-audio.mjs && node scripts/make-logo-transparent.mjs && prisma generate && next build",
     "start": "next start -H 0.0.0.0",
     "postbuild": "node scripts/prepare-standalone.mjs",
     "start:standalone": "node .next/standalone/server.js",
