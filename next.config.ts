@@ -4,6 +4,8 @@ const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   compress: true,
+  // Keep heavy extractors out of the server bundle / edge traces.
+  serverExternalPackages: ["@distube/ytdl-core", "@ybd-project/ytdl-core"],
 
   images: {
     remotePatterns: [{ protocol: "https", hostname: "images.unsplash.com" }]
@@ -38,8 +40,8 @@ const nextConfig: NextConfig = {
         source: "/live.mp3",
         headers: [
           { key: "Cache-Control", value: "no-store, no-cache" },
-          { key: "Access-Control-Allow-Origin", value: "*" },
-          { key: "Content-Type", value: "audio/mpeg" }
+          { key: "Access-Control-Allow-Origin", value: "*" }
+          // Do not force Content-Type — route may 302 to m4a/mp4 CDN audio.
         ]
       },
       {
