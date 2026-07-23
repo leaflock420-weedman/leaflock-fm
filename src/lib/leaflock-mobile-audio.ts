@@ -1,12 +1,20 @@
 /**
  * Lightweight Media Session host for phones.
  * Live room music = YouTube (unless DJ420_UPSTREAM_URL is a real Icecast stream).
- * Permanent element plays silent.mp3 at near-zero volume for OS controls only.
+ * Permanent element plays silent.mp3 at near-zero volume so the OS keeps
+ * Media Session / lock-screen controls while the page is backgrounded.
+ *
+ * NOTE: YouTube iframe audio is killed by Android Chrome when the app is fully
+ * backgrounded. True audible background music requires a real Icecast stream
+ * via DJ420_UPSTREAM_URL — never reintroduce yt-dlp on the web dyno (OOM).
  */
 
 export const LEAFLOCK_MOBILE_AUDIO_ID = "leaflockMobileAudio";
 export const LIVE_RADIO_STREAM_PATH = "/live.mp3";
 export const DJ420_PUBLIC_STREAM_URL = "https://fm.leaflock.com.au/live.mp3";
+
+/** Volume low enough to be inaudible as music but high enough Android often keeps the session. */
+const HOST_VOLUME = 0.02;
 
 export type LiveAudioMode = "stream" | "hold-loop" | "silent" | "unknown";
 
@@ -25,6 +33,21 @@ export function isPhoneUserAgent(): boolean {
   return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 }
 
+function hardenAudioEl(audio: HTMLAudioElement): void {
+  audio.setAttribute("playsinline", "true");
+  audio.setAttribute("webkit-playsinline", "true");
+  audio.setAttribute("x-webkit-airplay", "allow");
+  audio.preload = "auto";
+  audio.loop = true;
+  // Help some Android builds treat this as ongoing media.
+  try {
+    (audio as HTMLAudioElement & { disableRemotePlayback?: boolean }).disableRemotePlayback =
+      false;
+  } catch {
+    // ignore
+  }
+}
+
 export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   if (typeof document === "undefined") return null;
 
@@ -32,14 +55,14 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
     LEAFLOCK_MOBILE_AUDIO_ID
   ) as HTMLAudioElement | null;
 
-  if (audio) return audio;
+  if (audio) {
+    hardenAudioEl(audio);
+    return audio;
+  }
 
   audio = document.createElement("audio");
   audio.id = LEAFLOCK_MOBILE_AUDIO_ID;
-  audio.setAttribute("playsinline", "true");
-  audio.setAttribute("webkit-playsinline", "true");
-  audio.preload = "auto";
-  audio.loop = true;
+  hardenAudioEl(audio);
   audio.src = silentUrl();
   audio.setAttribute("aria-hidden", "true");
   audio.className = "pointer-events-none absolute h-px w-px opacity-0";
@@ -47,19 +70,21 @@ export function getLeaflockMobileAudio(): HTMLAudioElement | null {
   return audio;
 }
 
-/** Near-silent OS host (never the song). */
+/** Near-silent OS host (never the song). Keeps pull-down media controls alive. */
 export function startSilentMediaHost(): void {
   try {
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
-    audio.loop = true;
-    if (!audio.src.includes("silent.mp3") && !audio.src.includes("/live.mp3")) {
+    hardenAudioEl(audio);
+    audio.dataset.leaflockMode = "silent-host";
+    if (!audio.src.includes("silent.mp3")) {
       audio.src = silentUrl();
     }
-    // Prefer tiny silent file for host; live.mp3 may be silent too.
     audio.muted = false;
-    audio.volume = 0.001;
-    void audio.play().catch(() => undefined);
+    audio.volume = HOST_VOLUME;
+    if (audio.paused || audio.ended) {
+      void audio.play().catch(() => undefined);
+    }
   } catch {
     // ignore
   }
@@ -70,13 +95,13 @@ export function startLiveRadioAudio(volume01 = 0.85): void {
   try {
     const audio = getLeaflockMobileAudio();
     if (!audio) return;
+    hardenAudioEl(audio);
     audio.dataset.leaflockMode = "live-radio";
-    audio.loop = true;
-    if (!audio.src.includes("/live.mp3")) {
+    if (!audio.src.includes("/live.mp3") && !audio.src.includes("/api/fm/listen")) {
       audio.src = `${liveStreamUrl()}?t=${Date.now()}`;
     }
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.4, volume01));
+    audio.volume = Math.min(1, Math.max(0.35, volume01));
     void audio.play().catch(() => undefined);
   } catch {
     // ignore
@@ -87,9 +112,22 @@ export async function resumeLiveRadioAudio(volume01 = 0.85): Promise<boolean> {
   try {
     const audio = getLeaflockMobileAudio();
     if (!audio) return false;
+    hardenAudioEl(audio);
     audio.muted = false;
-    audio.volume = Math.min(1, Math.max(0.4, volume01));
-    if (audio.paused) await audio.play();
+    // Host / silent path uses a tiny volume; real stream uses full volume.
+    const isStream = audio.dataset.leaflockMode === "live-radio";
+    if (isStream) {
+      audio.volume = Math.min(1, Math.max(0.4, volume01));
+    } else {
+      audio.volume = Math.min(HOST_VOLUME, Math.max(0.001, volume01));
+    }
+    if (audio.paused || audio.ended) {
+      try {
+        await audio.play();
+      } catch {
+        // Autoplay / background policy — caller may retry on gesture.
+      }
+    }
     return !audio.paused;
   } catch {
     return false;
@@ -98,7 +136,10 @@ export async function resumeLiveRadioAudio(volume01 = 0.85): Promise<boolean> {
 
 export function pauseLiveRadioAudio(): void {
   try {
-    getLeaflockMobileAudio()?.pause();
+    const audio = getLeaflockMobileAudio();
+    if (!audio) return;
+    audio.dataset.leaflockMode = "paused";
+    audio.pause();
   } catch {
     // ignore
   }

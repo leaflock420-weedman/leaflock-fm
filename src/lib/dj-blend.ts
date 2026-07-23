@@ -1,6 +1,9 @@
-export const DEFAULT_PRE_ROLL_MS = 500;
-export const DEFAULT_BLEND_DURATION_MS = 4500;
-export const DEFAULT_BLEND_LEAD_SEC = 15;
+/** Soft lead-in before the equal-power crossfade. */
+export const DEFAULT_PRE_ROLL_MS = 800;
+/** Main DJ crossfade length (~8s = solid 5–10s blend). */
+export const DEFAULT_BLEND_DURATION_MS = 8000;
+/** Start preparing the next deck this many seconds before track end. */
+export const DEFAULT_BLEND_LEAD_SEC = 12;
 export const BLEND_POLL_INTERVAL_MS = 250;
 export const TOTAL_BLEND_MS = DEFAULT_PRE_ROLL_MS + DEFAULT_BLEND_DURATION_MS;
 

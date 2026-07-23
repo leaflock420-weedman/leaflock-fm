@@ -14,11 +14,15 @@ type LiveListener = {
   instagram?: string;
 };
 
+const LIVE_PLAYING_KEY = "leaflock-live-was-playing";
+
 export default function FmListenMode() {
   const [mode, setMode] = useState<ListenMode>("live");
   const [listenerCount, setListenerCount] = useState(0);
   const [listeners, setListeners] = useState<LiveListener[]>([]);
   const [hostStatus, setHostStatus] = useState<"online" | "offline">("online");
+  /** Bumped when user taps Join live room so the player auto-starts (gesture + re-join). */
+  const [liveJoinNonce, setLiveJoinNonce] = useState(0);
 
   useEffect(() => {
     try {
@@ -61,6 +65,14 @@ export default function FmListenMode() {
 
   function selectMode(next: ListenMode) {
     setMode(next);
+    if (next === "live") {
+      try {
+        window.sessionStorage.setItem(LIVE_PLAYING_KEY, "1");
+      } catch {
+        // ignore
+      }
+      setLiveJoinNonce((n) => n + 1);
+    }
     try {
       window.localStorage.setItem(MODE_KEY, next);
       void fetch("/api/fm/presence", {
@@ -87,6 +99,7 @@ export default function FmListenMode() {
         id={LEAFLOCK_MOBILE_AUDIO_ID}
         playsInline
         preload="auto"
+        loop
         className="pointer-events-none absolute h-px w-px opacity-0"
         aria-hidden
       />
@@ -106,7 +119,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">Join live room</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Same song, same timing — everyone in sync. Shared jukebox.
+              Auto-plays in sync with everyone — DJ blend between songs.
             </span>
           </button>
           <button
@@ -151,7 +164,13 @@ export default function FmListenMode() {
         ) : null}
       </div>
 
-      <LeafLockPlayer key={mode} mode="simple" listenMode={mode} />
+      <LeafLockPlayer
+        key={mode}
+        mode="simple"
+        listenMode={mode}
+        autoStartLive={mode === "live"}
+        autoStartNonce={liveJoinNonce}
+      />
 
       {mode === "live" ? <JukeboxForm sharedRoom /> : <JukeboxForm />}
     </div>
