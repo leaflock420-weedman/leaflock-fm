@@ -1,36 +1,50 @@
 /**
- * LeafLock continuous radio encoder (NOT the Next.js site).
+ * Continuous LeafLock radio encoder (separate from Next.js).
  *
- * GET /live.mp3 → never-ending audio/mpeg for:
- *   <audio id="leaflockRadio" src="https://leaflock-stream…/live.mp3">
+ * Phones play: <audio id="leaflockRadio" src="…/live.mp3" preload="none" playsinline>
  *
- * Track audio resolved with yt-dlp (preferred) then ytdl-core / Piped.
- * One shared encoder for all listeners. Optional 5s acrossfade.
+ * Pipeline: station track → yt-dlp download to cache → ffmpeg MP3 → all clients
+ * Optional 5s acrossfade. Fallback direct MP3 URLs if YouTube blocks the server IP.
  */
 
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { spawn, execFile } = require("child_process");
 const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 10000);
-const FM_API_BASE = (process.env.FM_API_BASE || "https://fm.leaflock.com.au").replace(
-  /\/$/,
-  ""
-);
+const FM_API_BASE = (process.env.FM_API_BASE || "https://fm.leaflock.com.au").replace(/\/$/, "");
 const BITRATE = process.env.MP3_BITRATE || "128k";
 const CROSSFADE_SEC = Math.max(2, Number(process.env.DJ_CROSSFADE_SEC || 5));
+const MEDIA_DIR = process.env.MEDIA_DIR || path.join("/tmp", "leaflock-media");
+
+/** Royalty-free direct MP3s so the mount never goes silent if YT is blocked. */
+const FALLBACK_MP3S = [
+  "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+  "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+  "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+  "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3",
+  "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-16.mp3"
+];
 
 const clients = new Set();
-const urlCache = new Map();
 let encoder = null;
 let loopRunning = false;
 let lastVideoId = null;
 let lastError = null;
 let lastEvent = "boot";
 let lastTitle = null;
-let resolveMethod = null;
+let lastSource = null;
+let fallbackIndex = 0;
+
+try {
+  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+} catch {
+  /* ignore */
+}
 
 function log(...a) {
   console.log(new Date().toISOString(), "[stream]", ...a);
@@ -56,6 +70,23 @@ function killEncoder() {
   encoder = null;
 }
 
+function writeCookiesFile() {
+  const raw = process.env.YTDLP_COOKIES || process.env.YOUTUBE_COOKIES || "";
+  if (!raw.trim()) return null;
+  const file = path.join(MEDIA_DIR, "youtube.cookies.txt");
+  try {
+    const body =
+      raw.includes("\t") || raw.includes("# Netscape")
+        ? raw
+        : Buffer.from(raw, "base64").toString("utf8");
+    fs.writeFileSync(file, body, "utf8");
+    return file;
+  } catch (e) {
+    log("cookies write failed", e.message);
+    return null;
+  }
+}
+
 async function getTrack() {
   const res = await fetch(`${FM_API_BASE}/api/fm/now-playing`, { cache: "no-store" });
   if (!res.ok) throw new Error("now-playing " + res.status);
@@ -69,23 +100,6 @@ async function getTrack() {
   };
 }
 
-async function peekNext() {
-  try {
-    const res = await fetch(`${FM_API_BASE}/api/fm/now-playing`, { cache: "no-store" });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data.nextVideoId) return null;
-    return {
-      videoId: data.nextVideoId,
-      title: data.nextTitle || "Up next",
-      offset: 0,
-      duration: 240
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function advance() {
   try {
     await fetch(`${FM_API_BASE}/api/fm/stream-next`, {
@@ -97,145 +111,86 @@ async function advance() {
   }
 }
 
-async function resolveViaYtDlp(videoId) {
-  const page = `https://www.youtube.com/watch?v=${videoId}`;
-  const clients = [
-    "youtube:player_client=android",
-    "youtube:player_client=ios",
-    "youtube:player_client=tv",
-    "youtube:player_client=web_embedded"
+/**
+ * Download audio to local cache with yt-dlp (more reliable than -g on some networks).
+ */
+async function downloadTrack(videoId) {
+  const outTemplate = path.join(MEDIA_DIR, `${videoId}.%(ext)s`);
+  const existing = ["m4a", "webm", "mp3", "opus"]
+    .map((ext) => path.join(MEDIA_DIR, `${videoId}.${ext}`))
+    .find((p) => {
+      try {
+        return fs.statSync(p).size > 50_000;
+      } catch {
+        return false;
+      }
+    });
+  if (existing) {
+    lastSource = "cache";
+    return existing;
+  }
+
+  const args = [
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio/best",
+    "-o",
+    outTemplate,
+    "--no-playlist",
+    "--no-warnings",
+    "--retries",
+    "3",
+    "--extractor-args",
+    "youtube:player_client=android,ios,tv,web_embedded"
   ];
-  let lastErr = null;
-  for (const client of clients) {
+
+  const cookies = writeCookiesFile();
+  if (cookies) args.push("--cookies", cookies);
+
+  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+
+  try {
+    await execFileAsync("yt-dlp", args, {
+      timeout: 120_000,
+      maxBuffer: 8 * 1024 * 1024
+    });
+  } catch (e) {
+    // try android-only
     try {
-      const { stdout } = await execFileAsync(
+      await execFileAsync(
         "yt-dlp",
         [
           "-f",
-          "bestaudio[ext=m4a]/bestaudio/best",
-          "-g",
+          "ba",
+          "-o",
+          outTemplate,
           "--no-playlist",
           "--no-warnings",
           "--extractor-args",
-          client,
-          page
+          "youtube:player_client=android",
+          ...(cookies ? ["--cookies", cookies] : []),
+          `https://www.youtube.com/watch?v=${videoId}`
         ],
-        { timeout: 45000, maxBuffer: 2 * 1024 * 1024 }
+        { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }
       );
-      const url = stdout
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .pop();
-      if (url && url.startsWith("http")) {
-        resolveMethod = "yt-dlp:" + client;
-        return url;
-      }
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error("yt-dlp failed");
-}
-
-async function resolveViaYtdlCore(videoId) {
-  const ytdl = require("@distube/ytdl-core");
-  const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
-    playerClients: ["ANDROID", "IOS", "TV", "WEB"]
-  });
-  const formats = ytdl.filterFormats(info.formats, "audioonly");
-  if (!formats.length) throw new Error("no formats");
-  formats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-  const f =
-    formats.find((x) => String(x.mimeType || "").includes("mp4")) || formats[0];
-  if (!f?.url) throw new Error("no url");
-  resolveMethod = "ytdl-core";
-  return f.url;
-}
-
-async function resolveViaPiped(videoId) {
-  const bases = [
-    process.env.PIPED_API_URL,
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.private.coffee",
-    "https://pipedapi.nosebs.ru"
-  ].filter(Boolean);
-
-  for (const base of bases) {
-    try {
-      const res = await fetch(`${String(base).replace(/\/$/, "")}/streams/${videoId}`, {
-        headers: { Accept: "application/json", "User-Agent": "LeafLockStream/1.0" },
-        signal: AbortSignal.timeout(12000)
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const streams = [...(data.audioStreams || [])].filter((s) => s.url?.startsWith("http"));
-      if (!streams.length) continue;
-      streams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-      resolveMethod = "piped:" + base;
-      return streams[0].url;
-    } catch {
-      /* next */
-    }
-  }
-  return null;
-}
-
-async function resolveViaInvidious(videoId) {
-  const bases = [
-    process.env.INVIDIOUS_API_URL,
-    "https://yewtu.be",
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de"
-  ].filter(Boolean);
-
-  for (const base of bases) {
-    try {
-      const res = await fetch(
-        `${String(base).replace(/\/$/, "")}/api/v1/videos/${videoId}?fields=adaptiveFormats`,
-        {
-          headers: { Accept: "application/json", "User-Agent": "LeafLockStream/1.0" },
-          signal: AbortSignal.timeout(12000)
-        }
+    } catch (e2) {
+      throw new Error(
+        (e2.stderr || e2.message || e.message || "yt-dlp download failed").toString().slice(-400)
       );
-      if (!res.ok) continue;
-      const data = await res.json();
-      const audio = (data.adaptiveFormats || [])
-        .filter((f) => f.url && String(f.type || "").startsWith("audio/"))
-        .sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0));
-      if (audio[0]?.url) {
-        resolveMethod = "invidious:" + base;
-        return audio[0].url;
-      }
-    } catch {
-      /* next */
     }
   }
-  return null;
-}
 
-async function resolveUrl(videoId) {
-  const cached = urlCache.get(videoId);
-  if (cached && cached.exp > Date.now()) {
-    resolveMethod = "cache";
-    return cached.url;
-  }
-
-  const errors = [];
-  for (const fn of [resolveViaYtDlp, resolveViaYtdlCore, resolveViaPiped, resolveViaInvidious]) {
-    try {
-      const url = await fn(videoId);
-      if (url) {
-        urlCache.set(videoId, { url, exp: Date.now() + 40 * 60 * 1000 });
-        log("resolved", videoId, "via", resolveMethod);
-        return url;
+  const found = ["m4a", "webm", "mp3", "opus"]
+    .map((ext) => path.join(MEDIA_DIR, `${videoId}.${ext}`))
+    .find((p) => {
+      try {
+        return fs.statSync(p).size > 50_000;
+      } catch {
+        return false;
       }
-    } catch (e) {
-      errors.push((e && e.message) || String(e));
-    }
-  }
-  throw new Error(errors.slice(-2).join(" | ") || "resolve failed");
+    });
+  if (!found) throw new Error("download missing file");
+  lastSource = "yt-dlp-file";
+  return found;
 }
 
 function ffmpegToClients(args) {
@@ -260,17 +215,10 @@ function ffmpegToClients(args) {
   });
 }
 
-async function playHttp(url, { start = 0, duration = null } = {}) {
-  const args = [
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    "-nostdin",
-    "-user_agent",
-    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
-  ];
+async function playLocalFile(file, { start = 0, duration = null } = {}) {
+  const args = ["-hide_banner", "-loglevel", "error", "-nostdin"];
   if (start > 2) args.push("-ss", String(Math.floor(start)));
-  args.push("-i", url);
+  args.push("-i", file);
   if (duration && duration > 5) args.push("-t", String(Math.floor(duration)));
   args.push(
     "-vn",
@@ -289,10 +237,34 @@ async function playHttp(url, { start = 0, duration = null } = {}) {
   await ffmpegToClients(args);
 }
 
-async function playCrossfade(urlA, urlB, startA, remainA) {
+async function playRemoteMp3(url) {
+  lastSource = "fallback-mp3";
+  await ffmpegToClients([
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-nostdin",
+    "-i",
+    url,
+    "-vn",
+    "-c:a",
+    "libmp3lame",
+    "-b:a",
+    BITRATE,
+    "-ar",
+    "44100",
+    "-ac",
+    "2",
+    "-f",
+    "mp3",
+    "pipe:1"
+  ]);
+}
+
+async function playCrossfadeFiles(fileA, fileB, startA, remainA) {
   const bodyDur = Math.max(12, remainA - CROSSFADE_SEC);
   if (bodyDur > 15) {
-    await playHttp(urlA, { start: startA, duration: bodyDur });
+    await playLocalFile(fileA, { start: startA, duration: bodyDur });
   }
   const ssA = Math.max(0, startA + bodyDur);
   await ffmpegToClients([
@@ -300,18 +272,16 @@ async function playCrossfade(urlA, urlB, startA, remainA) {
     "-loglevel",
     "error",
     "-nostdin",
-    "-user_agent",
-    "Mozilla/5.0",
     "-ss",
     String(ssA),
     "-t",
     String(CROSSFADE_SEC + 1),
     "-i",
-    urlA,
+    fileA,
     "-ss",
     "0",
     "-i",
-    urlB,
+    fileB,
     "-filter_complex",
     `[0:a][1:a]acrossfade=d=${CROSSFADE_SEC}:c1=tri:c2=tri[a]`,
     "-map",
@@ -330,7 +300,8 @@ async function playCrossfade(urlA, urlB, startA, remainA) {
   ]);
 }
 
-async function playHold(sec = 4) {
+async function playHold(sec = 3) {
+  lastSource = "hold";
   await ffmpegToClients([
     "-hide_banner",
     "-loglevel",
@@ -355,7 +326,7 @@ async function loop() {
   if (loopRunning) return;
   loopRunning = true;
   lastEvent = "loop-start";
-  log("encoder loop on");
+  log("encoder loop on, mediaDir=", MEDIA_DIR);
 
   while (true) {
     if (clients.size === 0) {
@@ -372,13 +343,24 @@ async function loop() {
         await advance();
         await new Promise((r) => setTimeout(r, 800));
         track = await getTrack();
-        if (track.videoId === lastVideoId) {
-          await playHold(2);
-          continue;
-        }
       }
 
-      const urlA = await resolveUrl(track.videoId);
+      let fileA = null;
+      try {
+        fileA = await downloadTrack(track.videoId);
+      } catch (e) {
+        lastError = e.message || String(e);
+        log("download fail", track.videoId, lastError.slice(0, 200));
+        // Fallback so the mount never dies
+        const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
+        fallbackIndex += 1;
+        lastTitle = track.title + " (backup bed)";
+        lastVideoId = track.videoId + "-fb";
+        await playRemoteMp3(fb);
+        await advance();
+        continue;
+      }
+
       const start =
         track.offset > 5 && track.offset < track.duration - 25 ? track.offset : 0;
       const remain = Math.max(25, track.duration - start);
@@ -386,38 +368,47 @@ async function loop() {
       lastVideoId = track.videoId;
       lastTitle = track.title;
       lastError = null;
-      log("play", track.videoId, track.title, "via", resolveMethod);
+      log("play", track.videoId, track.title, "src", lastSource);
 
+      // Play current track fully (minus crossfade tail if next is ready)
       await advance();
-      let next = await getTrack();
-      if (next.videoId === track.videoId) {
-        const peeked = await peekNext();
-        if (peeked) next = peeked;
+      let nextTrack = null;
+      try {
+        nextTrack = await getTrack();
+        if (nextTrack.videoId === track.videoId) nextTrack = null;
+      } catch {
+        nextTrack = null;
       }
 
-      if (next.videoId && next.videoId !== track.videoId) {
+      if (nextTrack) {
         try {
-          const urlB = await resolveUrl(next.videoId);
-          await playCrossfade(urlA, urlB, start, remain);
-          lastVideoId = next.videoId;
-          lastTitle = next.title;
-          await playHttp(urlB, { start: CROSSFADE_SEC });
+          const fileB = await downloadTrack(nextTrack.videoId);
+          await playCrossfadeFiles(fileA, fileB, start, remain);
+          lastVideoId = nextTrack.videoId;
+          lastTitle = nextTrack.title;
+          await playLocalFile(fileB, { start: CROSSFADE_SEC });
           continue;
         } catch (e) {
           log("crossfade fail", e.message);
-          await playHttp(urlA, { start, duration: remain });
+          await playLocalFile(fileA, { start, duration: remain });
         }
       } else {
-        await playHttp(urlA, { start, duration: remain });
+        await playLocalFile(fileA, { start, duration: remain });
       }
     } catch (e) {
       lastError = e.message || String(e);
       lastEvent = "err";
-      log("err", lastError);
+      log("err", lastError.slice(0, 300));
       try {
-        await playHold(4);
+        const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
+        fallbackIndex += 1;
+        await playRemoteMp3(fb);
       } catch {
-        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          await playHold(4);
+        } catch {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
       }
       try {
         await advance();
@@ -429,10 +420,10 @@ async function loop() {
 }
 
 const server = http.createServer((req, res) => {
-  const path = String(req.url || "/").split("?")[0];
-  lastEvent = "req:" + path;
+  const urlPath = String(req.url || "/").split("?")[0];
+  lastEvent = "req:" + urlPath;
 
-  if (path === "/health" || path === "/") {
+  if (urlPath === "/health" || urlPath === "/") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
@@ -444,7 +435,7 @@ const server = http.createServer((req, res) => {
         lastTitle,
         lastError,
         lastEvent,
-        resolveMethod,
+        lastSource,
         crossfadeSec: CROSSFADE_SEC,
         mount: "/live.mp3"
       })
@@ -452,7 +443,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (path === "/live.mp3" || path === "/live") {
+  if (urlPath === "/live.mp3" || urlPath === "/live") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store, no-cache");
