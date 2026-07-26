@@ -86,8 +86,15 @@ export default function FmListenMode() {
   return (
     <div className="space-y-6">
       {/*
-        Permanent native continuous stream — NEVER remount with React key.
-        src is the real continuous encoder URL (not YouTube, not yt-dlp per request).
+        Xiaohongshu model — permanent native media, fixed continuous stream URL:
+          Direct MP3 from continuous encoder (not Next.js / not YouTube iframe)
+                ↓
+          Native HTML <audio id="leaflockRadio">
+                ↓
+          Chrome owns the audio session
+                ↓
+          Pull-down / lock screen keep working after leaving Chrome
+        NEVER remount this with React key. NEVER ?t=Date.now() on src.
       */}
       <audio
         id={LEAFLOCK_RADIO_AUDIO_ID}

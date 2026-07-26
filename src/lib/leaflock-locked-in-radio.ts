@@ -1,10 +1,11 @@
 /**
- * Exact continuous-radio client:
- * - one permanent native <audio id="leaflockRadio">
- * - fixed stream URL (never changes, no cache-bust)
- * - Media Session station branding only
- * - audioSession.type = "playback" when available
- * - visibilitychange does nothing (no pause / reload / src swap)
+ * Xiaohongshu-style LeafLock radio client.
+ *
+ * Direct continuous MP3 (CDN/encoder) → permanent native <audio>
+ * → Chrome owns the session → pull-down / lock screen keep working.
+ *
+ * NO YouTube iframes. NO ?t= cache-bust. NO src swap on background.
+ * NO per-track reload in the browser.
  */
 
 import {
@@ -16,60 +17,60 @@ import {
 
 let userWantsPlay = false;
 let volume01 = 0.85;
-let visibilityBound = false;
+let hooksBound = false;
 
 function setAudioSessionPlayback() {
   try {
-    // Safari / supporting browsers: long-form music playback
-    const nav = navigator as Navigator & {
-      audioSession?: { type: string };
-    };
-    if (nav.audioSession) {
-      nav.audioSession.type = "playback";
-    }
+    const nav = navigator as Navigator & { audioSession?: { type: string } };
+    if (nav.audioSession) nav.audioSession.type = "playback";
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
-function bindVisibilityNoop() {
-  if (typeof document === "undefined" || visibilityBound) return;
-  visibilityBound = true;
+function bindGlobalHooks() {
+  if (typeof document === "undefined" || hooksBound) return;
+  hooksBound = true;
+
+  // Backgrounding must do nothing destructive
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      // Do not pause.
-      // Do not reload.
-      // Do not replace src.
-      // Do not destroy the player.
+      // Do not pause. Do not reload. Do not replace src. Do not destroy.
       return;
     }
   });
 }
 
-function getRadioEl(): HTMLAudioElement | null {
+/**
+ * Permanent element — create once with fixed stream URL.
+ */
+export function ensureLockedInRadioElement(): HTMLAudioElement | null {
   if (typeof document === "undefined") return null;
+  bindGlobalHooks();
 
-  let el = document.getElementById(LEAFLOCK_RADIO_AUDIO_ID) as HTMLAudioElement | null;
-  if (!el) {
-    el = document.createElement("audio");
-    el.id = LEAFLOCK_RADIO_AUDIO_ID;
-    el.setAttribute("playsinline", "true");
-    el.setAttribute("webkit-playsinline", "true");
-    el.preload = "none";
-    el.className = "pointer-events-none absolute h-px w-px opacity-0";
-    el.setAttribute("aria-hidden", "true");
-    document.body.appendChild(el);
-  }
-
-  // Fixed continuous stream URL — set once, never timestamp-bust
+  let radio = document.getElementById(LEAFLOCK_RADIO_AUDIO_ID) as HTMLAudioElement | null;
   const url = getLockedInRadioStreamUrl();
-  if (el.getAttribute("src") !== url) {
-    el.setAttribute("src", url);
-    el.src = url;
+
+  if (!radio) {
+    radio = document.createElement("audio");
+    radio.id = LEAFLOCK_RADIO_AUDIO_ID;
+    radio.setAttribute("playsinline", "true");
+    radio.setAttribute("webkit-playsinline", "true");
+    radio.preload = "none";
+    radio.src = url;
+    radio.setAttribute("src", url);
+    radio.className = "pointer-events-none absolute h-px w-px opacity-0";
+    radio.setAttribute("aria-hidden", "true");
+    document.body.appendChild(radio);
+  } else if (radio.getAttribute("src") !== url && !radio.src.includes(url.replace(/^https?:/, ""))) {
+    // Only set if empty/wrong — never thrash src while playing
+    if (!userWantsPlay || radio.paused) {
+      radio.src = url;
+      radio.setAttribute("src", url);
+    }
   }
 
-  bindVisibilityNoop();
-  return el;
+  return radio;
 }
 
 export function applyStationMediaSession(playing: boolean) {
@@ -99,20 +100,20 @@ export function applyStationMediaSession(playing: boolean) {
     navigator.mediaSession.setActionHandler("seekforward", null);
     navigator.mediaSession.setActionHandler("seekbackward", null);
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
-/** Core play — user gesture or Media Session play. */
+/** User gesture or Media Session play */
 export async function playRadio(): Promise<boolean> {
   userWantsPlay = true;
   setAudioSessionPlayback();
 
-  const radio = getRadioEl();
+  const radio = ensureLockedInRadioElement();
   if (!radio) return false;
 
   radio.muted = false;
-  radio.volume = Math.min(1, Math.max(0.2, volume01));
+  radio.volume = Math.min(1, Math.max(0.25, volume01));
 
   applyStationMediaSession(true);
 
@@ -129,48 +130,42 @@ export async function playRadio(): Promise<boolean> {
 
 export function pauseRadio(): void {
   userWantsPlay = false;
-  const radio = getRadioEl();
+  const radio = ensureLockedInRadioElement();
   try {
     radio?.pause();
   } catch {
-    // ignore
+    /* ignore */
   }
   if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
     try {
       navigator.mediaSession.playbackState = "paused";
     } catch {
-      // ignore
+      /* ignore */
     }
   }
   applyStationMediaSession(false);
 }
 
-/** @deprecated use playRadio */
 export async function startLockedInRadio(vol = 0.85): Promise<boolean> {
   volume01 = vol;
   return playRadio();
 }
 
-/** @deprecated use pauseRadio */
 export function pauseLockedInRadio(): void {
   pauseRadio();
 }
 
 export function isLockedInRadioPlaying(): boolean {
-  const radio = getRadioEl();
+  const radio = ensureLockedInRadioElement();
   return Boolean(userWantsPlay && radio && !radio.paused);
 }
 
 export function setLockedInRadioVolume(vol: number, muted = false): void {
   volume01 = vol;
-  const radio = getRadioEl();
+  const radio = ensureLockedInRadioElement();
   if (!radio) return;
   radio.volume = Math.min(1, Math.max(0, vol));
   radio.muted = muted || vol === 0;
-}
-
-export function ensureLockedInRadioElement(): HTMLAudioElement | null {
-  return getRadioEl();
 }
 
 export function getLockedInRadioWantsPlay(): boolean {
@@ -180,5 +175,3 @@ export function getLockedInRadioWantsPlay(): boolean {
 export function getLockedInRadioMode(): "stream" {
   return "stream";
 }
-
-export { applyStationMediaSession as applyStationMediaSessionExport };
