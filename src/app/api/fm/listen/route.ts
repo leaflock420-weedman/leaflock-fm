@@ -5,8 +5,11 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * Continuous Icecast proxy when DJ420_UPSTREAM_URL is set.
- * Track audio for phones uses /api/fm/radio-url (direct CDN) — not this route.
+ * Continuous Locked In Radio mount.
+ * Proxies Icecast/Liquidsoap when DJ420_UPSTREAM_URL (or PRIMARY_STREAM_URL) is set.
+ *
+ * Public client uses a permanent native <audio src="/live.mp3"> (or NEXT_PUBLIC_STREAM_URL).
+ * Phone Media Session shows only: LeafLock Radio / Locked In Radio / FM 104.2
  */
 
 function isSelfUrl(url: string): boolean {
@@ -21,12 +24,17 @@ function isSelfUrl(url: string): boolean {
     ) {
       return (
         u.pathname === "/live.mp3" ||
+        u.pathname === "/live" ||
         u.pathname === "/api/fm/listen" ||
         u.pathname.startsWith("/api/fm/listen")
       );
     }
   } catch {
-    return url.startsWith("/live.mp3") || url.startsWith("/api/fm/listen");
+    return (
+      url.startsWith("/live.mp3") ||
+      url.startsWith("/live") ||
+      url.startsWith("/api/fm/listen")
+    );
   }
   return false;
 }
@@ -35,7 +43,9 @@ function externalCandidates(): string[] {
   return [
     process.env.DJ420_UPSTREAM_URL,
     process.env.PRIMARY_STREAM_URL,
-    process.env.ICECAST_URL
+    process.env.ICECAST_URL,
+    // Optional dedicated host (if DNS points at your encoder)
+    process.env.STREAM_HOST_URL
   ]
     .map((v) => v?.trim())
     .filter((v): v is string => Boolean(v && !isSelfUrl(v)));
@@ -73,24 +83,24 @@ export async function GET(request: Request) {
         headers: out
       });
     } catch (error) {
-      console.error("[live.mp3] upstream failed", url, error);
+      console.error("[live] upstream failed", url, error);
     }
   }
 
-  // No continuous encoder — clients use /api/fm/radio-url instead.
   return NextResponse.json(
     {
-      error: "use_radio_url",
-      station: "LeafLock Locked In Radio",
+      error: "continuous_stream_offline",
+      station: "LeafLock Radio",
+      artist: "Locked In Radio",
+      album: "FM 104.2",
       message:
-        "No continuous Icecast configured. Client plays /api/fm/radio-url (direct CDN tracks on native audio).",
-      radioUrl: "/api/fm/radio-url"
+        "No continuous encoder on DJ420_UPSTREAM_URL. Point that env at Icecast (e.g. https://stream.leaflock.com.au/live.mp3). Public Live Room is native <audio> only — no YouTube."
     },
     {
       status: 503,
       headers: {
         "Cache-Control": "no-store",
-        "X-LeafLock-Audio-Source": "use-radio-url"
+        "X-LeafLock-Audio-Source": "offline"
       }
     }
   );

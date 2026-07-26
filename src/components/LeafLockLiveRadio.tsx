@@ -1,15 +1,16 @@
 "use client";
 
 /**
- * LeafLock Locked In Radio UI — always tries to play real native audio.
- * No encoder wall. No YouTube. Tune-in works on first tap.
+ * Public Live Room — LeafLock Radio / Locked In Radio
+ *
+ * Phone controller: station branding only (no song title, no next/prev).
+ * Website may still show separate “Now Playing” info below.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Pause, Play, Radio, Volume2, VolumeX } from "lucide-react";
 import {
   ensureLockedInRadioElement,
-  getLockedInRadioMode,
   isLockedInRadioPlaying,
   pauseLockedInRadio,
   setLockedInRadioVolume,
@@ -31,15 +32,12 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [volume, setVolume] = useState(0.85);
   const [muted, setMuted] = useState(false);
-  const [modeLabel, setModeLabel] = useState("Radio");
-  const [uiNowPlaying, setUiNowPlaying] = useState<string | null>(null);
+  /** Website-only now playing — never sent to Media Session / pull-down. */
+  const [webNowPlaying, setWebNowPlaying] = useState<string | null>(null);
+  const streamUrl = getLockedInRadioStreamUrl();
 
   const syncUi = useCallback(() => {
     setIsPlaying(isLockedInRadioPlaying());
-    const m = getLockedInRadioMode();
-    setModeLabel(
-      m === "stream" ? "Continuous stream" : m === "track" ? "Live room audio" : "Radio"
-    );
   }, []);
 
   const tuneIn = useCallback(async () => {
@@ -50,14 +48,12 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     const ok = await startLockedInRadio(muted ? 0 : volume);
     setIsBuffering(false);
     setIsPlaying(ok);
-    syncUi();
-
     if (!ok) {
-      setError("Could not start radio. Tap Tune in again (phone needs one tap for sound).");
-    } else {
-      setError(null);
+      setError(
+        "Could not connect to the live stream. Tap Tune in again — your phone needs one tap to unlock sound."
+      );
     }
-  }, [muted, syncUi, volume]);
+  }, [muted, volume]);
 
   const stop = useCallback(() => {
     pauseLockedInRadio();
@@ -66,12 +62,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
   }, []);
 
   useEffect(() => {
-    // Auto-start on first paint when already on live (after join gesture or remount)
-    if (joinNonce > 0) {
-      void tuneIn();
-      return;
-    }
-    // Default live page: still try once decks/metadata ready path via gesture event
+    if (joinNonce > 0) void tuneIn();
   }, [joinNonce, tuneIn]);
 
   useEffect(() => {
@@ -82,18 +73,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     return () => window.removeEventListener("leaflock-live-join", onJoin);
   }, [tuneIn]);
 
-  // First visit with live default: start on first user pointer anywhere is handled by Join;
-  // also try auto-start after short delay if browser allows (usually blocked → overlay play).
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      if (!isLockedInRadioPlaying()) {
-        void tuneIn();
-      }
-    }, 600);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot mount attempt
-  }, []);
-
+  // Website-only now playing (does not change phone Media Session)
   useEffect(() => {
     const load = async () => {
       try {
@@ -103,7 +83,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
           current?: { title?: string; artist?: string };
         };
         if (data.current?.title) {
-          setUiNowPlaying(
+          setWebNowPlaying(
             data.current.artist
               ? `${data.current.title} — ${data.current.artist}`
               : data.current.title
@@ -114,7 +94,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       }
     };
     void load();
-    const id = window.setInterval(() => void load(), 15_000);
+    const id = window.setInterval(() => void load(), 20_000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -122,13 +102,12 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     ensureLockedInRadioElement();
     const el = document.getElementById(LEAFLOCK_RADIO_AUDIO_ID) as HTMLAudioElement | null;
     if (!el) return;
-    const onPlay = () => syncUi();
-    const onPause = () => syncUi();
-    el.addEventListener("playing", onPlay);
-    el.addEventListener("pause", onPause);
+    const bump = () => syncUi();
+    el.addEventListener("playing", bump);
+    el.addEventListener("pause", bump);
     return () => {
-      el.removeEventListener("playing", onPlay);
-      el.removeEventListener("pause", onPause);
+      el.removeEventListener("playing", bump);
+      el.removeEventListener("pause", bump);
     };
   }, [syncUi]);
 
@@ -142,18 +121,20 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
         <button
           type="button"
           onClick={() => void tuneIn()}
-          className="absolute inset-0 z-20 flex flex-col items-center justify-center rounded-3xl bg-black/75 px-6 text-center backdrop-blur-sm"
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center rounded-3xl bg-black/80 px-6 text-center backdrop-blur-sm"
         >
           <span className="text-xs font-bold uppercase tracking-[0.28em] text-emerald-400">
             Locked In Radio
           </span>
-          <span className="mt-3 text-2xl font-semibold text-white">Tap to tune in</span>
+          <span className="mt-3 text-2xl font-semibold text-white">
+            {LEAFLOCK_RADIO_STATION.title}
+          </span>
           <span className="mt-2 max-w-sm text-sm text-zinc-400">
-            Native radio audio — keeps the pull-down bar after you leave Chrome.
+            One continuous stream. Leave Chrome — pull-down play/pause keeps working.
           </span>
           <span className="mt-6 inline-flex items-center gap-2 rounded-full bg-emerald-500 px-6 py-3 text-sm font-bold text-black">
             <Play className="h-4 w-4" fill="currentColor" />
-            Tune in now
+            Tune in
           </span>
         </button>
       ) : null}
@@ -161,12 +142,13 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.28em] text-emerald-400">
-            Locked In Radio
+            Live Room
           </p>
           <h2 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">
             {LEAFLOCK_RADIO_STATION.title}
           </h2>
           <p className="mt-1 text-sm text-zinc-400">{LEAFLOCK_RADIO_STATION.artist}</p>
+          <p className="mt-0.5 text-xs text-zinc-600">{LEAFLOCK_RADIO_STATION.album}</p>
         </div>
         <div
           className={`mt-1 h-3 w-3 shrink-0 rounded-full ${
@@ -177,15 +159,18 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       </div>
 
       <p className="mt-4 text-sm text-zinc-500">
-        {modeLabel} · leave the app and use pull-down play/pause. Sound is native HTML audio, not
-        YouTube.
+        Phone lock screen shows station name only — not individual songs. DJ mix is inside the
+        stream.
       </p>
 
-      {uiNowPlaying ? (
-        <p className="mt-3 text-xs text-zinc-500">
-          <span className="uppercase tracking-wider text-zinc-600">On air · </span>
-          {uiNowPlaying}
-        </p>
+      {/* Website-only now playing — intentionally NOT the Media Session title */}
+      {webNowPlaying ? (
+        <div className="mt-4 rounded-xl border border-white/5 bg-black/40 px-4 py-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-600">
+            On the website only
+          </p>
+          <p className="mt-1 text-sm text-zinc-300">{webNowPlaying}</p>
+        </div>
       ) : null}
 
       {error ? <p className="mt-3 text-sm text-amber-400">{error}</p> : null}
@@ -199,7 +184,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
           }}
           disabled={isBuffering}
           className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500 text-black transition hover:bg-emerald-400 disabled:opacity-50 touch-manipulation"
-          aria-label={isPlaying ? "Pause radio" : "Tune in"}
+          aria-label={isPlaying ? "Pause" : "Play"}
         >
           {isBuffering ? (
             <Loader2 className="h-7 w-7 animate-spin" />
@@ -238,7 +223,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
 
       <div className="mt-6 flex items-center gap-2 text-xs text-zinc-600">
         <Radio className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate font-mono">{getLockedInRadioStreamUrl()}</span>
+        <span className="truncate font-mono">{streamUrl}</span>
       </div>
     </div>
   );

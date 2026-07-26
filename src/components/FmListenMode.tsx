@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
 import LeafLockLiveRadio from "@/components/LeafLockLiveRadio";
 import JukeboxForm from "@/components/JukeboxForm";
-import { LEAFLOCK_RADIO_AUDIO_ID } from "@/lib/leaflock-radio-stream";
+import {
+  getLockedInRadioStreamUrl,
+  LEAFLOCK_RADIO_AUDIO_ID
+} from "@/lib/leaflock-radio-stream";
 
 export type ListenMode = "live" | "solo";
 
@@ -21,13 +24,12 @@ export default function FmListenMode() {
   const [listeners, setListeners] = useState<LiveListener[]>([]);
   const [hostStatus, setHostStatus] = useState<"online" | "offline">("online");
   const [liveJoinNonce, setLiveJoinNonce] = useState(0);
+  const streamUrl = getLockedInRadioStreamUrl();
 
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(MODE_KEY);
-      if (stored === "solo" || stored === "live") {
-        setMode(stored);
-      }
+      if (stored === "solo" || stored === "live") setMode(stored);
     } catch {
       // ignore
     }
@@ -35,7 +37,6 @@ export default function FmListenMode() {
 
   useEffect(() => {
     if (mode !== "live") return;
-
     const poll = async () => {
       try {
         const response = await fetch("/api/fm/station", { cache: "no-store" });
@@ -51,17 +52,15 @@ export default function FmListenMode() {
         // ignore
       }
     };
-
     void poll();
-    const intervalId = window.setInterval(() => void poll(), 12_000);
-    return () => window.clearInterval(intervalId);
+    const id = window.setInterval(() => void poll(), 12_000);
+    return () => window.clearInterval(id);
   }, [mode]);
 
   function selectMode(next: ListenMode) {
     setMode(next);
     if (next === "live") {
       setLiveJoinNonce((n) => n + 1);
-      // Same user-gesture stack → Chrome allows audio.play()
       try {
         window.dispatchEvent(new CustomEvent("leaflock-live-join", { detail: { gesture: true } }));
       } catch {
@@ -75,8 +74,7 @@ export default function FmListenMode() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listenerId:
-            window.localStorage.getItem("leaflock-listener-id") ??
-            `listener_${Date.now()}`,
+            window.localStorage.getItem("leaflock-listener-id") ?? `listener_${Date.now()}`,
           displayName: next === "live" ? "Locked In Radio" : "Private jukebox"
         })
       });
@@ -87,10 +85,14 @@ export default function FmListenMode() {
 
   return (
     <div className="space-y-6">
-      {/* Permanent native radio element — Xiaohongshu model.
-          Fixed stream URL, never remounted with React key={mode}. */}
+      {/*
+        Permanent native radio element — Xiaohongshu / real radio model.
+        Fixed continuous stream URL. Never remounted with React key.
+        Media Session branding is set in leaflock-locked-in-radio.ts
+      */}
       <audio
         id={LEAFLOCK_RADIO_AUDIO_ID}
+        src={streamUrl}
         playsInline
         preload="none"
         className="pointer-events-none absolute h-px w-px opacity-0"
@@ -111,9 +113,9 @@ export default function FmListenMode() {
                 : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
             }`}
           >
-            <span className="block text-sm font-semibold">Locked In Radio</span>
+            <span className="block text-sm font-semibold">LeafLock Radio</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Continuous stream — keeps playing after you leave Chrome (like native radio).
+              Locked In Radio — continuous stream, works after you leave Chrome.
             </span>
           </button>
           <button
@@ -127,7 +129,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">Private jukebox</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Your own YouTube shuffle + DJ blend (foreground listening).
+              Your own YouTube shuffle + DJ blend (foreground).
             </span>
           </button>
         </div>
@@ -139,17 +141,15 @@ export default function FmListenMode() {
             </p>
             <p className="mt-1 text-xs text-zinc-400">
               {listenerCount > 0
-                ? `${listenerCount} listener${listenerCount === 1 ? "" : "s"} tuned in`
-                : "Tune in — continuous Locked In Radio"}
+                ? `${listenerCount} listener${listenerCount === 1 ? "" : "s"} locked in`
+                : "Tune in to Locked In Radio"}
             </p>
             {listeners.length > 0 ? (
               <p className="mt-1 text-xs text-zinc-500">
                 {listeners
                   .slice(0, 6)
-                  .map((listener) =>
-                    listener.instagram
-                      ? `@${listener.instagram.replace(/^@/, "")}`
-                      : "Anonymous"
+                  .map((l) =>
+                    l.instagram ? `@${l.instagram.replace(/^@/, "")}` : "Anonymous"
                   )
                   .join(" · ")}
               </p>

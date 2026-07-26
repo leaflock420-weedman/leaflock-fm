@@ -40,8 +40,11 @@ services:
         value: "0"
       # Optional: real Icecast/Liquidsoap URL (best continuous radio)
       # DJ420_UPSTREAM_URL: https://your-icecast:8000/live.mp3
+      # Permanent native <audio> src for Live Room (same-origin continuous mount)
       - key: NEXT_PUBLIC_STREAM_URL
         value: https://fm.leaflock.com.au/live.mp3
+      # When Icecast is live, set this in the Render dashboard (not in git if secret):
+      # DJ420_UPSTREAM_URL=https://stream.leaflock.com.au/live.mp3
       - key: YOUTUBE_API_KEY
         value: AIzaSyD4f1Oc6R9xC58TSiS99BvayekV29rZO2A
       - key: FM_ADMIN_SECRET

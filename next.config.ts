@@ -37,11 +37,17 @@ const nextConfig: NextConfig = {
         ]
       },
       {
+        source: "/live",
+        headers: [
+          { key: "Cache-Control", value: "no-store, no-cache" },
+          { key: "Access-Control-Allow-Origin", value: "*" }
+        ]
+      },
+      {
         source: "/live.mp3",
         headers: [
           { key: "Cache-Control", value: "no-store, no-cache" },
           { key: "Access-Control-Allow-Origin", value: "*" }
-          // Do not force Content-Type — route may 302 to m4a/mp4 CDN audio.
         ]
       },
       {
