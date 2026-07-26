@@ -4,7 +4,7 @@
  */
 
 const http = require("http");
-const { spawn, execFileSync } = require("child_process");
+const { spawn } = require("child_process");
 const ytdl = require("@distube/ytdl-core");
 
 const PORT = Number(process.env.PORT || 8000);
@@ -216,6 +216,7 @@ const server = http.createServer((req, res) => {
     }
 
     if (path === "/live.mp3" || path === "/live") {
+      // Flush headers immediately — no sync ffmpeg here (was causing 500s)
       res.writeHead(200, {
         "Content-Type": "audio/mpeg",
         "Cache-Control": "no-store, no-cache",
@@ -227,40 +228,17 @@ const server = http.createServer((req, res) => {
         "X-LeafLock-Station": "LeafLock Locked In Radio"
       });
 
-      // Immediate tiny silence so gateways see body bytes
-      try {
-        const pad = execFileSync(
-          "ffmpeg",
-          [
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=44100:cl=stereo",
-            "-t",
-            "0.25",
-            "-ab",
-            "128k",
-            "-f",
-            "mp3",
-            "pipe:1"
-          ],
-          { maxBuffer: 1024 * 1024, timeout: 8000 }
-        );
-        res.write(pad);
-      } catch (e) {
-        log("pad failed", e.message);
-      }
-
       clients.add(res);
       log("client+", clients.size);
       req.on("close", () => {
         clients.delete(res);
         log("client-", clients.size);
       });
-      void loop();
+
+      // Start encoder without blocking this request
+      setImmediate(() => {
+        void loop();
+      });
       return;
     }
 
