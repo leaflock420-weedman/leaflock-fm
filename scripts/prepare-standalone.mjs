@@ -19,3 +19,12 @@ await mkdir(path.join(standalone, "data"), { recursive: true });
 await copyIfExists(path.join(root, "public"), path.join(standalone, "public"));
 await copyIfExists(path.join(root, ".next", "static"), path.join(standalone, ".next", "static"));
 await copyIfExists(path.join(root, "data"), path.join(standalone, "data"));
+// Ensure Node instrumentation helper is present for standalone server
+await copyIfExists(
+  path.join(root, "src", "instrumentation-node.ts"),
+  path.join(standalone, "instrumentation-node.ts")
+);
+await copyIfExists(
+  path.join(root, "src", "instrumentation-node.ts"),
+  path.join(standalone, "src", "instrumentation-node.ts")
+);

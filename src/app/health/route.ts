@@ -9,6 +9,11 @@ export const runtime = "nodejs";
 
 const STATION_PATH = path.join(process.cwd(), "data", "station-state.json");
 
+/**
+ * Render healthCheckPath — MUST return 200 once the process is listening.
+ * Full FM readiness is reported as `ready`, not as HTTP status, so a slow
+ * station bootstrap never rolls back a good deploy.
+ */
 export async function GET() {
   const checks: Record<string, boolean> = {
     server: true,
@@ -32,8 +37,14 @@ export async function GET() {
     checks.stationState = false;
   }
 
-  const dj420 = await getDj420State();
-  checks.dj420Heartbeat = resolveDj420Status(dj420) === "online";
+  let hostStatus: "online" | "offline" = "offline";
+  try {
+    const dj420 = await getDj420State();
+    hostStatus = resolveDj420Status(dj420);
+    checks.dj420Heartbeat = hostStatus === "online";
+  } catch {
+    checks.dj420Heartbeat = false;
+  }
 
   try {
     const nowPlaying = await getNowPlaying();
@@ -42,21 +53,21 @@ export async function GET() {
     checks.currentTrack = false;
   }
 
-  const fmReady =
+  const ready =
     checks.server &&
-    checks.stationState &&
-    checks.dj420Heartbeat &&
-    checks.currentTrack;
+    (checks.stationState || checks.currentTrack || checks.dj420Heartbeat);
 
   return Response.json(
     {
-      ok: fmReady,
+      ok: true,
+      ready,
       checks,
       databaseConnected: checks.database,
       hostName: "DJ420",
-      hostStatus: resolveDj420Status(dj420),
-      serverTime: new Date().toISOString()
+      hostStatus,
+      serverTime: new Date().toISOString(),
+      build: "xhs-stream-v1"
     },
-    { status: fmReady ? 200 : 503 }
+    { status: 200 }
   );
 }

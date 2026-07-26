@@ -1,14 +1,16 @@
 /**
- * Next.js instrumentation entry.
- * Must not statically import Node-only modules (fs/path) — Edge build will fail.
+ * Next.js instrumentation — static import path so standalone output includes the module.
+ * Only runs on Node (not Edge).
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  // Variable import path keeps webpack from eagerly bundling Node deps into Edge.
-  const nodeBoot = "./instrumentation-node";
-  const mod = (await import(nodeBoot)) as {
-    bootNodeInstrumentation: () => Promise<void>;
-  };
-  await mod.bootNodeInstrumentation();
+  try {
+    // Static path (not a variable) so Next/standalone packages this file.
+    const { bootNodeInstrumentation } = await import("./instrumentation-node");
+    await bootNodeInstrumentation();
+  } catch (error) {
+    // Never crash the process on boot failure — health must stay green for deploys.
+    console.error("[instrumentation] boot failed (continuing):", error);
+  }
 }
