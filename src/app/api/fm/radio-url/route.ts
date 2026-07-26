@@ -1,50 +1,42 @@
-import { getCurrentLiveTrackAudio } from "@/lib/dj420-audio-source";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 30;
 
 /**
- * JSON feed for LeafLock Locked In Radio.
- * Client sets <audio src={url}> to a direct CDN link so playback continues
- * after leaving Chrome (no Render proxy timeout mid-song).
+ * Public info for Locked In Radio — continuous mount only (not per-track CDN).
  */
 export async function GET() {
-  try {
-    const track = await getCurrentLiveTrackAudio();
-    if (!track) {
-      return NextResponse.json(
-        {
-          ok: false,
-          source: "unavailable",
-          station: "LeafLock Locked In Radio",
-          error: "Could not resolve current track audio"
-        },
-        { status: 503 }
-      );
-    }
+  const upstream =
+    process.env.DJ420_UPSTREAM_URL?.trim() ||
+    process.env.PRIMARY_STREAM_URL?.trim() ||
+    process.env.ICECAST_URL?.trim() ||
+    null;
 
+  const mount = "https://fm.leaflock.com.au/live.mp3";
+
+  if (!upstream || upstream.includes("fm.leaflock.com.au")) {
     return NextResponse.json({
-      ok: true,
-      source: "radio",
+      ok: false,
+      source: "offline",
       station: "LeafLock Locked In Radio",
-      mount: "https://fm.leaflock.com.au/live.mp3",
-      videoId: track.videoId,
-      title: track.title,
-      artist: track.artist ?? "LeafLock Locked In Radio",
-      offsetSeconds: track.offsetSeconds,
-      durationSec: track.durationSec,
-      revision: track.revision,
-      contentType: track.contentType,
-      url: track.audioUrl,
-      thumbnail: track.thumbnail ?? null
+      title: "LeafLock Radio",
+      artist: "Locked In Radio",
+      mount,
+      url: mount,
+      note: "Configure DJ420_UPSTREAM_URL to a continuous Icecast stream."
     });
-  } catch (error) {
-    console.error("[radio-url]", error);
-    return NextResponse.json(
-      { ok: false, error: "radio-url failed", station: "LeafLock Locked In Radio" },
-      { status: 503 }
-    );
   }
+
+  return NextResponse.json({
+    ok: true,
+    source: "stream",
+    station: "LeafLock Locked In Radio",
+    title: "LeafLock Radio",
+    artist: "Locked In Radio",
+    album: "LeafLock FM 104.2",
+    mount,
+    url: mount,
+    upstream
+  });
 }

@@ -2,11 +2,9 @@
 
 import { useEffect, useState } from "react";
 import LeafLockPlayer from "@/app/components/LeafLockPlayer";
+import LeafLockLiveRadio from "@/components/LeafLockLiveRadio";
 import JukeboxForm from "@/components/JukeboxForm";
-import {
-  LEAFLOCK_MOBILE_AUDIO_B_ID,
-  LEAFLOCK_MOBILE_AUDIO_ID
-} from "@/lib/leaflock-mobile-audio";
+import { LEAFLOCK_RADIO_AUDIO_ID } from "@/lib/leaflock-radio-stream";
 
 export type ListenMode = "live" | "solo";
 
@@ -17,14 +15,11 @@ type LiveListener = {
   instagram?: string;
 };
 
-const LIVE_PLAYING_KEY = "leaflock-live-was-playing";
-
 export default function FmListenMode() {
   const [mode, setMode] = useState<ListenMode>("live");
   const [listenerCount, setListenerCount] = useState(0);
   const [listeners, setListeners] = useState<LiveListener[]>([]);
   const [hostStatus, setHostStatus] = useState<"online" | "offline">("online");
-  /** Bumped when user taps Join live room so the player auto-starts (gesture + re-join). */
   const [liveJoinNonce, setLiveJoinNonce] = useState(0);
 
   useEffect(() => {
@@ -34,7 +29,7 @@ export default function FmListenMode() {
         setMode(stored);
       }
     } catch {
-      // Ignore storage errors.
+      // ignore
     }
   }, []);
 
@@ -47,36 +42,26 @@ export default function FmListenMode() {
         const payload = (await response.json()) as {
           listenerCount?: number;
           listeners?: LiveListener[];
-          hostName?: string;
           hostStatus?: "online" | "offline";
         };
         setListenerCount(payload.listenerCount ?? 0);
         setListeners(payload.listeners ?? []);
         setHostStatus(payload.hostStatus === "offline" ? "offline" : "online");
       } catch {
-        // Ignore polling errors.
+        // ignore
       }
     };
 
     void poll();
-    const intervalId = window.setInterval(() => {
-      void poll();
-    }, 12_000);
-
+    const intervalId = window.setInterval(() => void poll(), 12_000);
     return () => window.clearInterval(intervalId);
   }, [mode]);
 
   function selectMode(next: ListenMode) {
     setMode(next);
     if (next === "live") {
-      try {
-        window.sessionStorage.setItem(LIVE_PLAYING_KEY, "1");
-      } catch {
-        // ignore
-      }
       setLiveJoinNonce((n) => n + 1);
-      // CRITICAL: fire in the same user-gesture stack so Chrome allows autoplay.
-      // useEffect / await after click loses the gesture and forces a Play tap.
+      // Same user-gesture stack → Chrome allows audio.play()
       try {
         window.dispatchEvent(new CustomEvent("leaflock-live-join", { detail: { gesture: true } }));
       } catch {
@@ -92,32 +77,26 @@ export default function FmListenMode() {
           listenerId:
             window.localStorage.getItem("leaflock-listener-id") ??
             `listener_${Date.now()}`,
-          displayName: next === "live" ? "Live room" : "Private jukebox"
+          displayName: next === "live" ? "Locked In Radio" : "Private jukebox"
         })
       });
     } catch {
-      // Ignore storage errors.
+      // ignore
     }
   }
 
   return (
     <div className="space-y-6">
-      {/* Permanent LeafLock Locked In Radio element — survives player remounts.
-          Live room music plays here so it continues after you leave Chrome. */}
+      {/* Permanent native radio element — Xiaohongshu model.
+          Fixed stream URL, never remounted with React key={mode}. */}
       <audio
-        id={LEAFLOCK_MOBILE_AUDIO_ID}
+        id={LEAFLOCK_RADIO_AUDIO_ID}
         playsInline
-        preload="auto"
+        preload="none"
         className="pointer-events-none absolute h-px w-px opacity-0"
         aria-hidden
       />
-      <audio
-        id={LEAFLOCK_MOBILE_AUDIO_B_ID}
-        playsInline
-        preload="auto"
-        className="pointer-events-none absolute h-px w-px opacity-0"
-        aria-hidden
-      />
+
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-5">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
           How do you want to listen?
@@ -132,11 +111,9 @@ export default function FmListenMode() {
                 : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
             }`}
           >
-            <span className="block text-sm font-semibold">
-              {mode === "live" ? "Locked In Radio (tap to start)" : "Join live room"}
-            </span>
+            <span className="block text-sm font-semibold">Locked In Radio</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Continuous radio — keeps playing after you leave the app. Everyone in sync.
+              Continuous stream — keeps playing after you leave Chrome (like native radio).
             </span>
           </button>
           <button
@@ -150,7 +127,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">Private jukebox</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Your own shuffle — separate from the live audience.
+              Your own YouTube shuffle + DJ blend (foreground listening).
             </span>
           </button>
         </div>
@@ -163,7 +140,7 @@ export default function FmListenMode() {
             <p className="mt-1 text-xs text-zinc-400">
               {listenerCount > 0
                 ? `${listenerCount} listener${listenerCount === 1 ? "" : "s"} tuned in`
-                : "You are the first listener — joining the live broadcast in progress"}
+                : "Tune in — continuous Locked In Radio"}
             </p>
             {listeners.length > 0 ? (
               <p className="mt-1 text-xs text-zinc-500">
@@ -181,13 +158,11 @@ export default function FmListenMode() {
         ) : null}
       </div>
 
-      <LeafLockPlayer
-        key={mode}
-        mode="simple"
-        listenMode={mode}
-        autoStartLive={mode === "live"}
-        autoStartNonce={liveJoinNonce}
-      />
+      {mode === "live" ? (
+        <LeafLockLiveRadio joinNonce={liveJoinNonce} />
+      ) : (
+        <LeafLockPlayer key="solo" mode="simple" listenMode="solo" />
+      )}
 
       {mode === "live" ? <JukeboxForm sharedRoom /> : <JukeboxForm />}
     </div>

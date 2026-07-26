@@ -1,13 +1,32 @@
-# DJ420 Liquidsoap (continuous Live Radio)
+# DJ420 continuous Locked In Radio (Xiaohongshu model)
 
-Crossfades run **once on the server**. Phones play the permanent element:
+## Architecture
 
-`https://fm.leaflock.com.au/live.mp3`
+```
+Liquidsoap playlist + 5s crossfade
+        ↓
+Icecast /live.mp3  (never-ending stream)
+        ↓
+https://fm.leaflock.com.au/live.mp3  (optional same-origin proxy)
+        ↓
+Native HTML <audio id="leaflockRadio">  (one element, fixed URL)
+        ↓
+Chrome Media Session → pull-down / lock screen keeps working after you leave
+```
 
-(same-origin on the main site — no `stream.` DNS required for the app).
+This is the same pattern Xiaohongshu uses for browser media: **native HTML media + direct continuous file/stream**, not a cross-origin YouTube iframe.
 
-Optional: point `DJ420_UPSTREAM_URL` at your Icecast/Liquidsoap encoder
-(e.g. `https://stream.leaflock.com.au/live.mp3`) so `/live.mp3` proxies real radio.
+| Mode | Engine |
+|------|--------|
+| **Locked In Radio (live)** | Continuous Icecast stream only |
+| **Private jukebox** | YouTube dual-deck + client DJ blend |
+
+Do **not**:
+
+- Put live music in YouTube iframes
+- Proxy one YouTube track at a time through Next.js / yt-dlp
+- Cache-bust the stream with `?t=Date.now()`
+- Use a silent audio bridge for live radio
 
 ## Quick start (Docker)
 
@@ -18,30 +37,34 @@ export ICECAST_SOURCE_PASSWORD='your-strong-password'
 docker compose up -d
 ```
 
-Icecast listen URL (raw):
+Icecast listen URL:
 
 `http://YOUR_HOST:8000/live.mp3`
 
-**DNS (required):** create an A/CNAME record for `stream.leaflock.com.au` pointing at this host.
-Without DNS, `nslookup stream.leaflock.com.au` fails and the app cannot use Liquidsoap.
-
-Terminate TLS (Caddy/nginx) so clients use:
+Put TLS in front (Caddy/nginx) so clients use:
 
 `https://stream.leaflock.com.au/live.mp3`
 
-## Env for LeafLock FM (Render)
+## Render env (LeafLock web app)
 
 ```
+DJ420_UPSTREAM_URL=https://stream.leaflock.com.au/live.mp3
 PRIMARY_STREAM_URL=https://stream.leaflock.com.au/live.mp3
-NEXT_PUBLIC_STREAM_URL=https://stream.leaflock.com.au/live.mp3
+NEXT_PUBLIC_STREAM_URL=https://fm.leaflock.com.au/live.mp3
 ```
 
-## Liquidsoap config
+`/live.mp3` on the main site **proxies** the upstream Icecast mount (same-origin for phones).
 
-See `dj420.liq` — playlist + 4s crossfade + Icecast MP3 output.
+## Liquidsoap
 
-## Notes
+See `dj420.liq` — playlist + equal-power style crossfade + Icecast MP3 output.
 
-- Do **not** run DJ Blend crossfade on every Live Radio listener phone.
-- Private jukebox still uses YouTube + client DJ Blend.
-- Fill `playlists/main.m3u` with real audio file paths Liquidsoap can read.
+## Media Session branding
+
+The phone UI shows:
+
+- **Title:** LeafLock Radio  
+- **Artist:** Locked In Radio  
+- **Album:** LeafLock FM 104.2  
+
+Song titles can still appear in the website UI; they are **not** required on the lock screen.
