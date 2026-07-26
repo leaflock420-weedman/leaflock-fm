@@ -4,7 +4,11 @@
  *   <audio id="leaflockRadio" src="https://leaflock-stream…/live.mp3" preload="none" playsinline>
  *   MediaSession: LeafLock Radio / Locked In Radio / LeafLock FM 104.2
  *   play / pause only
- *   visibilitychange: no pause, no reload, no src swap
+ *   visibilitychange: no pause, no reload, no src swap (except live-edge resync)
+ *
+ * Multi-listener sync: all phones join the same continuous mount. When the
+ * shared encoder advances to a new song, we rejoin the live edge so buffered
+ * clients do not stay on the previous song for 20–40s.
  */
 
 import {
@@ -17,6 +21,9 @@ import {
 let userWantsPlay = false;
 let volume01 = 0.85;
 let hooksBound = false;
+let lastSyncedVideoId: string | null = null;
+let resyncInFlight = false;
+let lastResyncAt = 0;
 
 function setAudioSessionPlayback() {
   try {
@@ -51,13 +58,14 @@ export function ensureLockedInRadioElement(): HTMLAudioElement | null {
     radio.setAttribute("playsinline", "true");
     radio.setAttribute("webkit-playsinline", "true");
     radio.preload = "none";
+    // Live stream hints (not all browsers honor these)
+    radio.setAttribute("data-live", "true");
     radio.src = url;
     radio.setAttribute("src", url);
     radio.className = "pointer-events-none absolute h-px w-px opacity-0";
     radio.setAttribute("aria-hidden", "true");
     document.body.appendChild(radio);
   } else {
-    // Keep fixed continuous URL — never ?t=
     const current = radio.getAttribute("src") || "";
     if (!current.includes("leaflock-stream") && !current.includes("stream.leaflock")) {
       radio.src = url;
@@ -97,6 +105,72 @@ export function applyStationMediaSession(playing: boolean) {
   }
 }
 
+/**
+ * Force rejoin the continuous mount at the live edge (same URL, no YouTube).
+ * Used when the shared encoder moves to a new track so every phone snaps together.
+ */
+export async function resyncRadioToLiveEdge(reason = "track-change"): Promise<boolean> {
+  if (!userWantsPlay) return false;
+  if (resyncInFlight) return false;
+  const now = Date.now();
+  // Avoid thrashing
+  if (now - lastResyncAt < 4_000) return false;
+  resyncInFlight = true;
+  lastResyncAt = now;
+
+  const url = getLockedInRadioStreamUrl();
+  const radio = ensureLockedInRadioElement();
+  if (!radio) {
+    resyncInFlight = false;
+    return false;
+  }
+
+  try {
+    setAudioSessionPlayback();
+    try {
+      radio.pause();
+    } catch {
+      /* ignore */
+    }
+    // Tear down buffered progressive body, then re-open the live mount
+    radio.removeAttribute("src");
+    radio.load();
+    radio.src = url;
+    radio.setAttribute("src", url);
+    radio.muted = false;
+    radio.volume = Math.min(1, Math.max(0.25, volume01));
+    applyStationMediaSession(true);
+    await radio.play();
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = "playing";
+    }
+    console.info("[leaflock-radio] live-edge resync", reason);
+    return !radio.paused;
+  } catch {
+    return false;
+  } finally {
+    resyncInFlight = false;
+  }
+}
+
+/**
+ * Call when stream-authoritative videoId is known.
+ * If the shared song changed while we are tuned in, rejoin live edge.
+ */
+export async function noteSharedTrackVideoId(videoId: string | null | undefined): Promise<void> {
+  if (!videoId) return;
+  const id = String(videoId).replace(/-fb$/, "");
+  if (!lastSyncedVideoId) {
+    lastSyncedVideoId = id;
+    return;
+  }
+  if (id === lastSyncedVideoId) return;
+  lastSyncedVideoId = id;
+  if (userWantsPlay) {
+    await resyncRadioToLiveEdge("song-change:" + id);
+  }
+}
+
 export async function playRadio(): Promise<boolean> {
   userWantsPlay = true;
   setAudioSessionPlayback();
@@ -108,13 +182,26 @@ export async function playRadio(): Promise<boolean> {
   applyStationMediaSession(true);
 
   try {
+    // Fresh open to live edge on each explicit Tune in
+    if (radio.paused || radio.ended || radio.readyState === 0) {
+      const url = getLockedInRadioStreamUrl();
+      if ((radio.getAttribute("src") || "") !== url) {
+        radio.src = url;
+        radio.setAttribute("src", url);
+      }
+    }
     await radio.play();
     if ("mediaSession" in navigator) {
       navigator.mediaSession.playbackState = "playing";
     }
     return !radio.paused;
   } catch {
-    return false;
+    // Hard rejoin once
+    try {
+      return await resyncRadioToLiveEdge("play-retry");
+    } catch {
+      return false;
+    }
   }
 }
 

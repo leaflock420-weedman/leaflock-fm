@@ -574,52 +574,57 @@ async function playHold(sec = 3) {
 }
 
 /**
- * Always-on radio loop. Keeps encoding even with zero listeners so every phone
- * that tunes in joins the SAME live edge (same song, same place).
+ * Always-on radio loop — ONE shared timeline, ONE song at a time.
+ *
+ * Critical for multi-listener sync:
+ * - Never play two full tracks per loop (old crossfade path double-advanced)
+ * - Keep bytes flowing between tracks so browsers do not stall/reconnect differently
+ * - All HTTP clients only attach; never restart the mount per listener
  */
 async function loop() {
   if (loopRunning) return;
   loopRunning = true;
   lastEvent = "loop-start";
   cookiesPath = writeCookiesFile();
-  log(
-    "always-on encoder, mediaDir=",
-    MEDIA_DIR,
-    "jsRuntime=node",
-    "cookies=",
-    Boolean(cookiesPath)
-  );
+  log("always-on single-timeline encoder", MEDIA_DIR);
+
+  /** Prefetch next file while current plays */
+  let prefetched = /** @type {{ videoId: string, file: string } | null} */ (null);
 
   while (true) {
     try {
       let track = await getTrack();
       lastEvent = "track:" + track.videoId;
 
-      // Avoid replaying the same id if station has not advanced yet
-      if (
-        lastVideoId &&
-        track.videoId === lastVideoId &&
-        !String(lastVideoId).endsWith("-fb")
-      ) {
+      // Station still on what we just finished → nudge once
+      const cleanLast = lastVideoId && String(lastVideoId).replace(/-fb$/, "");
+      if (cleanLast && track.videoId === cleanLast) {
         await advance();
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 400));
         track = await getTrack();
       }
 
       let fileA = null;
-      for (let attempt = 0; attempt < 6 && !fileA; attempt++) {
-        try {
-          if (attempt > 0) {
-            await advance();
-            await new Promise((r) => setTimeout(r, 400));
-            track = await getTrack();
-            lastEvent = "skip:" + track.videoId;
+      if (prefetched && prefetched.videoId === track.videoId) {
+        fileA = prefetched.file;
+        lastSource = "cache";
+        prefetched = null;
+      } else {
+        prefetched = null;
+        for (let attempt = 0; attempt < 8 && !fileA; attempt++) {
+          try {
+            if (attempt > 0) {
+              await advance();
+              await new Promise((r) => setTimeout(r, 300));
+              track = await getTrack();
+              lastEvent = "skip:" + track.videoId;
+            }
+            fileA = await downloadTrack(track.videoId);
+          } catch (e) {
+            lastError = e.message || String(e);
+            log("download fail", track.videoId, lastError.slice(0, 180));
+            fileA = null;
           }
-          fileA = await downloadTrack(track.videoId);
-        } catch (e) {
-          lastError = e.message || String(e);
-          log("download fail", track.videoId, lastError.slice(0, 220));
-          fileA = null;
         }
       }
 
@@ -632,14 +637,14 @@ async function loop() {
         nextVideoId = track.nextVideoId || null;
         nextTitle = track.nextTitle || null;
         trackStartedAtMs = Date.now();
-        trackDurationSec = 90;
+        trackDurationSec = 60;
         await publishSync({
           videoId: track.videoId,
           title: lastTitle,
           artist: lastArtist,
           nextVideoId,
           nextTitle,
-          durationSec: 90,
+          durationSec: 60,
           startedAt: new Date(trackStartedAtMs).toISOString(),
           source: "fallback-mp3"
         });
@@ -649,18 +654,17 @@ async function loop() {
         continue;
       }
 
-      // Cold start only: join mid-track to match global station clock.
-      // After that the encoder owns the timeline so all listeners stay aligned.
+      // Only seek mid-track on cold boot (join shared station position once)
       let start = 0;
       if (
         honorStationOffsetOnce &&
-        track.offset > 5 &&
-        track.offset < track.duration - 25
+        track.offset > 8 &&
+        track.offset < track.duration - 30
       ) {
-        start = track.offset;
+        start = Math.floor(track.offset);
       }
       honorStationOffsetOnce = false;
-      const remain = Math.max(20, track.duration - start);
+      const remain = Math.max(25, track.duration - start);
 
       lastVideoId = track.videoId;
       lastTitle = track.title;
@@ -670,7 +674,7 @@ async function loop() {
       lastError = null;
       trackStartedAtMs = Date.now();
       trackDurationSec = remain;
-      log("play", track.videoId, track.title, "src", lastSource, "start", start);
+      log("play", track.videoId, track.title, "src", lastSource, "start", start, "remain", remain);
 
       await publishSync({
         videoId: track.videoId,
@@ -683,71 +687,29 @@ async function loop() {
         source: lastSource
       });
 
-      // Peek next for crossfade WITHOUT advancing station yet
-      let nextMeta = null;
-      if (track.nextVideoId && track.nextVideoId !== track.videoId) {
-        nextMeta = {
-          videoId: track.nextVideoId,
-          title: track.nextTitle || "Up next",
-          duration: 240
-        };
+      // Prefetch up-next while this song plays (does not advance station)
+      if (nextVideoId && nextVideoId !== track.videoId) {
+        const peekId = nextVideoId;
+        void downloadTrack(peekId)
+          .then((f) => {
+            prefetched = { videoId: peekId, file: f };
+          })
+          .catch(() => {
+            /* ignore */
+          });
       }
 
-      if (nextMeta) {
-        try {
-          const fileB = await downloadTrack(nextMeta.videoId);
-          await playCrossfadeFiles(fileA, fileB, start, remain);
-          // Current finished into next — one advance, then finish next, then one advance.
-          await advance();
-          lastVideoId = nextMeta.videoId;
-          lastTitle = nextMeta.title;
-          lastArtist = null;
-          trackStartedAtMs = Date.now();
-          trackDurationSec = Math.max(30, (nextMeta.duration || 240) - CROSSFADE_SEC);
-          // Refresh up-next after advance
-          try {
-            const t2 = await getTrack();
-            nextVideoId = t2.nextVideoId || null;
-            nextTitle = t2.nextTitle || null;
-          } catch {
-            nextVideoId = null;
-            nextTitle = null;
-          }
-          await publishSync({
-            videoId: nextMeta.videoId,
-            title: nextMeta.title,
-            nextVideoId,
-            nextTitle,
-            durationSec: trackDurationSec,
-            startedAt: new Date(trackStartedAtMs).toISOString(),
-            source: lastSource
-          });
-          await playLocalFile(fileB, { start: CROSSFADE_SEC });
-          await advance();
-          continue;
-        } catch (e) {
-          log("crossfade fail", e.message);
-          await playLocalFile(fileA, { start, duration: remain });
-          await advance();
-        }
-      } else {
-        await playLocalFile(fileA, { start, duration: remain });
-        await advance();
-      }
+      // ONE song only — then advance once. No double-play / double-advance.
+      await playLocalFile(fileA, { start, duration: remain });
+      await advance();
     } catch (e) {
       lastError = e.message || String(e);
       lastEvent = "err";
       log("err", lastError.slice(0, 300));
       try {
-        const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
-        fallbackIndex += 1;
-        await playRemoteMp3(fb);
+        await playHold(3);
       } catch {
-        try {
-          await playHold(4);
-        } catch {
-          await new Promise((r) => setTimeout(r, 2000));
-        }
+        await new Promise((r) => setTimeout(r, 1500));
       }
       try {
         await advance();
@@ -801,7 +763,7 @@ const server = http.createServer((req, res) => {
           trackStartedAtMs > 0
             ? Math.max(0, (Date.now() - trackStartedAtMs) / 1000)
             : 0,
-        build: "sync-meta-v2"
+        build: "sync-single-v3"
       })
     );
     return;
@@ -889,15 +851,21 @@ const server = http.createServer((req, res) => {
   if (urlPath === "/live.mp3" || urlPath === "/live") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store, no-cache, no-transform");
+    res.setHeader("Cache-Control", "no-store, no-cache, no-transform, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    // Live mount: discourage range/seek buffering that desyncs listeners
+    res.setHeader("Accept-Ranges", "none");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("X-LeafLock-Audio-Source", "continuous-encoder");
     res.setHeader("X-LeafLock-Station", "LeafLock Locked In Radio");
     res.setHeader("X-LeafLock-Sync", "always-on-shared");
     res.setHeader("icy-name", "LeafLock FM 104.2");
     res.setHeader("icy-description", "DJ420 - Locked In Radio");
     if (lastTitle) res.setHeader("icy-title", lastTitle);
+    if (lastVideoId) res.setHeader("X-LeafLock-VideoId", String(lastVideoId));
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     clients.add(res);
@@ -912,7 +880,6 @@ const server = http.createServer((req, res) => {
     req.on("close", onClose);
     res.on("close", onClose);
 
-    // Encoder is always-on from boot; keep a safety start if it ever died
     void loop();
     return;
   }
