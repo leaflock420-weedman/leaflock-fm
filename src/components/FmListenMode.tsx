@@ -6,7 +6,8 @@ import LeafLockLiveRadio from "@/components/LeafLockLiveRadio";
 import JukeboxForm from "@/components/JukeboxForm";
 import {
   getLockedInRadioStreamUrl,
-  LEAFLOCK_RADIO_AUDIO_ID
+  LEAFLOCK_RADIO_AUDIO_ID,
+  LEAFLOCK_STREAM_URL
 } from "@/lib/leaflock-radio-stream";
 
 export type ListenMode = "live" | "solo";
@@ -19,19 +20,21 @@ type LiveListener = {
 };
 
 export default function FmListenMode() {
+  // Default live — continuous radio, not YouTube
   const [mode, setMode] = useState<ListenMode>("live");
   const [listenerCount, setListenerCount] = useState(0);
   const [listeners, setListeners] = useState<LiveListener[]>([]);
   const [hostStatus, setHostStatus] = useState<"online" | "offline">("online");
   const [liveJoinNonce, setLiveJoinNonce] = useState(0);
-  const streamUrl = getLockedInRadioStreamUrl();
+  const streamUrl = getLockedInRadioStreamUrl() || LEAFLOCK_STREAM_URL;
 
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(MODE_KEY);
+      // Prefer live for new sessions; only keep solo if user chose it
       if (stored === "solo" || stored === "live") setMode(stored);
     } catch {
-      // ignore
+      /* ignore */
     }
   }, []);
 
@@ -49,7 +52,7 @@ export default function FmListenMode() {
         setListeners(payload.listeners ?? []);
         setHostStatus(payload.hostStatus === "offline" ? "offline" : "online");
       } catch {
-        // ignore
+        /* ignore */
       }
     };
     void poll();
@@ -64,7 +67,7 @@ export default function FmListenMode() {
       try {
         window.dispatchEvent(new CustomEvent("leaflock-live-join", { detail: { gesture: true } }));
       } catch {
-        // ignore
+        /* ignore */
       }
     }
     try {
@@ -79,22 +82,16 @@ export default function FmListenMode() {
         })
       });
     } catch {
-      // ignore
+      /* ignore */
     }
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-leaflock-live-engine="native-stream">
       {/*
-        Xiaohongshu model — permanent native media, fixed continuous stream URL:
-          Direct MP3 from continuous encoder (not Next.js / not YouTube iframe)
-                ↓
-          Native HTML <audio id="leaflockRadio">
-                ↓
-          Chrome owns the audio session
-                ↓
-          Pull-down / lock screen keep working after leaving Chrome
-        NEVER remount this with React key. NEVER ?t=Date.now() on src.
+        REQUIRED: permanent native audio for Live Room background playback.
+        Must NOT be remounted with React key={mode}.
+        Must NOT use YouTube. Must NOT use ?t= cache-bust.
       */}
       <audio
         id={LEAFLOCK_RADIO_AUDIO_ID}
@@ -103,6 +100,7 @@ export default function FmListenMode() {
         preload="none"
         className="pointer-events-none absolute h-px w-px opacity-0"
         aria-hidden
+        data-stream={streamUrl}
       />
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-5">
@@ -121,7 +119,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">LeafLock Radio</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Continuous stream — keeps playing after you leave Chrome.
+              Locked In Radio — continuous stream, works after you leave Chrome.
             </span>
           </button>
           <button
@@ -135,7 +133,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">Private jukebox</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              YouTube shuffle + DJ blend (foreground).
+              YouTube shuffle + DJ blend (foreground only).
             </span>
           </button>
         </div>
@@ -164,6 +162,7 @@ export default function FmListenMode() {
         ) : null}
       </div>
 
+      {/* Live = native continuous audio ONLY. Solo = YouTube player. */}
       {mode === "live" ? (
         <LeafLockLiveRadio joinNonce={liveJoinNonce} />
       ) : (

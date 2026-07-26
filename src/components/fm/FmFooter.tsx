@@ -61,7 +61,8 @@ export default function FmFooter() {
         </nav>
       ) : null}
       <p className="mx-auto mt-4 max-w-lg text-xs leading-relaxed text-zinc-500">
-        Music playback powered by YouTube. LeafLock FM is a branded community radio experience.
+        Live Room uses continuous native radio (Locked In Radio). Private jukebox uses YouTube for
+        personal shuffle only.
       </p>
     </footer>
   );
