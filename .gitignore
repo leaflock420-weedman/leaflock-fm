@@ -9,3 +9,6 @@ dist
 prisma/dev.db
 data/
 bin/
+stream-server/seed-cache/
+stream-server/*.js-player-script.js
+stream-server/*-player-script.js

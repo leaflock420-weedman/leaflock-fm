@@ -611,6 +611,14 @@ const server = http.createServer((req, res) => {
   lastEvent = "req:" + urlPath;
 
   if (urlPath === "/health" || urlPath === "/") {
+    let cachedTracks = 0;
+    try {
+      cachedTracks = fs
+        .readdirSync(MEDIA_DIR)
+        .filter((f) => /\.(m4a|webm|mp3|opus|mp4)$/i.test(f)).length;
+    } catch {
+      /* ignore */
+    }
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(
@@ -629,9 +637,89 @@ const server = http.createServer((req, res) => {
         cookiesConfigured: Boolean(
           process.env.YTDLP_COOKIES || process.env.YOUTUBE_COOKIES
         ),
-        build: "yt-js-runtime-v1"
+        cachedTracks,
+        build: "yt-seed-cache-v2"
       })
     );
+    return;
+  }
+
+  // Authenticated cache seed: POST /admin/seed?videoId=XXX  body=raw audio bytes
+  // Used when Render IPs are YouTube-bot-blocked — seed from a residential machine.
+  if (urlPath === "/admin/seed" && req.method === "POST") {
+    const secret = req.headers["x-stream-secret"] || "";
+    const expected = process.env.FM_ADMIN_SECRET || "";
+    if (!expected || secret !== expected) {
+      res.statusCode = 401;
+      res.end("unauthorized");
+      return;
+    }
+    const u = new URL(req.url || "/", "http://localhost");
+    const videoId = String(u.searchParams.get("videoId") || "").replace(
+      /[^a-zA-Z0-9_-]/g,
+      ""
+    );
+    if (!videoId || videoId.length < 6) {
+      res.statusCode = 400;
+      res.end("videoId required");
+      return;
+    }
+    const ext = String(u.searchParams.get("ext") || "m4a").replace(
+      /[^a-z0-9]/gi,
+      ""
+    ) || "m4a";
+    const dest = path.join(MEDIA_DIR, `${videoId}.${ext}`);
+    const chunks = [];
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (total > 40 * 1024 * 1024) {
+        res.statusCode = 413;
+        res.end("too large");
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      try {
+        const buf = Buffer.concat(chunks);
+        if (buf.length < 50_000) {
+          res.statusCode = 400;
+          res.end("file too small");
+          return;
+        }
+        fs.writeFileSync(dest, buf);
+        lastEvent = "seed:" + videoId;
+        log("seeded", videoId, buf.length, ext);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: true, videoId, bytes: buf.length, path: dest }));
+      } catch (e) {
+        res.statusCode = 500;
+        res.end(String(e.message || e));
+      }
+    });
+    return;
+  }
+
+  if (urlPath === "/admin/cache" && req.method === "GET") {
+    const secret = req.headers["x-stream-secret"] || "";
+    const expected = process.env.FM_ADMIN_SECRET || "";
+    if (!expected || secret !== expected) {
+      res.statusCode = 401;
+      res.end("unauthorized");
+      return;
+    }
+    let files = [];
+    try {
+      files = fs.readdirSync(MEDIA_DIR).filter((f) => /\.(m4a|webm|mp3|opus|mp4)$/i.test(f));
+    } catch {
+      files = [];
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true, count: files.length, files: files.slice(0, 500) }));
     return;
   }
 
