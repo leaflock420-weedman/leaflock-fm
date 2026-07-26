@@ -1,17 +1,15 @@
 "use client";
 
 /**
- * LeafLock Locked In Radio — Xiaohongshu-style live player.
- *
- * Sound comes ONLY from a permanent native <audio> continuous stream.
- * No YouTube iframes. No silent bridge. No per-track reloads.
- * DJ crossfade is server-side (Liquidsoap); the phone hears one never-ending stream.
+ * LeafLock Locked In Radio UI — always tries to play real native audio.
+ * No encoder wall. No YouTube. Tune-in works on first tap.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Pause, Play, Radio, Volume2, VolumeX } from "lucide-react";
 import {
   ensureLockedInRadioElement,
+  getLockedInRadioMode,
   isLockedInRadioPlaying,
   pauseLockedInRadio,
   setLockedInRadioVolume,
@@ -24,7 +22,6 @@ import {
 } from "@/lib/leaflock-radio-stream";
 
 type Props = {
-  /** Bump when user re-taps Join so we start in the same gesture stack. */
   joinNonce?: number;
 };
 
@@ -34,24 +31,15 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [volume, setVolume] = useState(0.85);
   const [muted, setMuted] = useState(false);
-  const [streamOnline, setStreamOnline] = useState<boolean | null>(null);
+  const [modeLabel, setModeLabel] = useState("Radio");
   const [uiNowPlaying, setUiNowPlaying] = useState<string | null>(null);
 
   const syncUi = useCallback(() => {
     setIsPlaying(isLockedInRadioPlaying());
-  }, []);
-
-  const probeStream = useCallback(async () => {
-    try {
-      const res = await fetch("/api/fm/listen-status", { cache: "no-store" });
-      const data = (await res.json()) as { source?: string; ok?: boolean };
-      const online = data.source === "stream";
-      setStreamOnline(online);
-      return online;
-    } catch {
-      setStreamOnline(false);
-      return false;
-    }
+    const m = getLockedInRadioMode();
+    setModeLabel(
+      m === "stream" ? "Continuous stream" : m === "track" ? "Live room audio" : "Radio"
+    );
   }, []);
 
   const tuneIn = useCallback(async () => {
@@ -59,23 +47,17 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     setIsBuffering(true);
     ensureLockedInRadioElement();
 
-    const online = await probeStream();
-    if (!online) {
-      setIsBuffering(false);
-      setIsPlaying(false);
-      setError(
-        "Continuous radio encoder is offline. Locked In Radio needs Liquidsoap/Icecast on DJ420_UPSTREAM_URL — not YouTube."
-      );
-      return;
-    }
-
     const ok = await startLockedInRadio(muted ? 0 : volume);
     setIsBuffering(false);
     setIsPlaying(ok);
+    syncUi();
+
     if (!ok) {
-      setError("Could not start radio. Tap Tune in again (browser needs a tap for sound).");
+      setError("Could not start radio. Tap Tune in again (phone needs one tap for sound).");
+    } else {
+      setError(null);
     }
-  }, [muted, probeStream, volume]);
+  }, [muted, syncUi, volume]);
 
   const stop = useCallback(() => {
     pauseLockedInRadio();
@@ -83,13 +65,15 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     setIsBuffering(false);
   }, []);
 
-  // Join button / nonce: start in gesture path when possible
   useEffect(() => {
-    if (joinNonce <= 0) return;
-    void tuneIn();
+    // Auto-start on first paint when already on live (after join gesture or remount)
+    if (joinNonce > 0) {
+      void tuneIn();
+      return;
+    }
+    // Default live page: still try once decks/metadata ready path via gesture event
   }, [joinNonce, tuneIn]);
 
-  // Custom event from FmListenMode Join tap (same user-gesture stack)
   useEffect(() => {
     const onJoin = () => {
       void tuneIn();
@@ -98,7 +82,18 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
     return () => window.removeEventListener("leaflock-live-join", onJoin);
   }, [tuneIn]);
 
-  // Optional: show current track in UI only (not Media Session — station branding stays)
+  // First visit with live default: start on first user pointer anywhere is handled by Join;
+  // also try auto-start after short delay if browser allows (usually blocked → overlay play).
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (!isLockedInRadioPlaying()) {
+        void tuneIn();
+      }
+    }, 600);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot mount attempt
+  }, []);
+
   useEffect(() => {
     const load = async () => {
       try {
@@ -119,15 +114,9 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       }
     };
     void load();
-    const id = window.setInterval(() => void load(), 20_000);
+    const id = window.setInterval(() => void load(), 15_000);
     return () => window.clearInterval(id);
   }, []);
-
-  useEffect(() => {
-    void probeStream();
-    const id = window.setInterval(() => void probeStream(), 30_000);
-    return () => window.clearInterval(id);
-  }, [probeStream]);
 
   useEffect(() => {
     ensureLockedInRadioElement();
@@ -149,6 +138,26 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
 
   return (
     <div className="relative mx-auto w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl sm:p-8">
+      {!isPlaying && !isBuffering ? (
+        <button
+          type="button"
+          onClick={() => void tuneIn()}
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center rounded-3xl bg-black/75 px-6 text-center backdrop-blur-sm"
+        >
+          <span className="text-xs font-bold uppercase tracking-[0.28em] text-emerald-400">
+            Locked In Radio
+          </span>
+          <span className="mt-3 text-2xl font-semibold text-white">Tap to tune in</span>
+          <span className="mt-2 max-w-sm text-sm text-zinc-400">
+            Native radio audio — keeps the pull-down bar after you leave Chrome.
+          </span>
+          <span className="mt-6 inline-flex items-center gap-2 rounded-full bg-emerald-500 px-6 py-3 text-sm font-bold text-black">
+            <Play className="h-4 w-4" fill="currentColor" />
+            Tune in now
+          </span>
+        </button>
+      ) : null}
+
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.28em] text-emerald-400">
@@ -168,24 +177,15 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       </div>
 
       <p className="mt-4 text-sm text-zinc-500">
-        Continuous station stream — same model as native browser radio. Leave Chrome; pull-down
-        play/pause keeps working. DJ mix is on the server, not on your phone.
+        {modeLabel} · leave the app and use pull-down play/pause. Sound is native HTML audio, not
+        YouTube.
       </p>
 
       {uiNowPlaying ? (
         <p className="mt-3 text-xs text-zinc-500">
-          <span className="uppercase tracking-wider text-zinc-600">On air (info only) · </span>
+          <span className="uppercase tracking-wider text-zinc-600">On air · </span>
           {uiNowPlaying}
         </p>
-      ) : null}
-
-      {streamOnline === false ? (
-        <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          Encoder offline. Set <code className="text-amber-200">DJ420_UPSTREAM_URL</code> to your
-          Liquidsoap/Icecast mount (e.g.{" "}
-          <code className="text-amber-200">https://stream.leaflock.com.au/live.mp3</code>). Without
-          that continuous stream, background radio cannot work like Xiaohongshu.
-        </div>
       ) : null}
 
       {error ? <p className="mt-3 text-sm text-amber-400">{error}</p> : null}
@@ -237,7 +237,7 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
       </div>
 
       <div className="mt-6 flex items-center gap-2 text-xs text-zinc-600">
-        <Radio className="h-3.5 w-3.5" />
+        <Radio className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate font-mono">{getLockedInRadioStreamUrl()}</span>
       </div>
     </div>

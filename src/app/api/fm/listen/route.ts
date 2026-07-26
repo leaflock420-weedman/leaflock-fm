@@ -5,12 +5,8 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * LeafLock Locked In Radio mount: https://fm.leaflock.com.au/live.mp3
- *
- * Xiaohongshu model: ONE continuous Icecast/Liquidsoap MP3 stream.
- * DJ crossfade on the encoder. Phone = permanent native <audio>. No YouTube.
- *
- * Set DJ420_UPSTREAM_URL=https://stream.leaflock.com.au/live.mp3
+ * Continuous Icecast proxy when DJ420_UPSTREAM_URL is set.
+ * Track audio for phones uses /api/fm/radio-url (direct CDN) — not this route.
  */
 
 function isSelfUrl(url: string): boolean {
@@ -57,12 +53,7 @@ export async function GET(request: Request) {
       };
       if (range) headers.Range = range;
 
-      // No short timeout — this is a long-lived radio connection.
-      const upstream = await fetch(url, {
-        headers,
-        cache: "no-store"
-      });
-
+      const upstream = await fetch(url, { headers, cache: "no-store" });
       if (!upstream.ok && upstream.status !== 206) continue;
       if (!upstream.body) continue;
 
@@ -76,8 +67,6 @@ export async function GET(request: Request) {
       out.set("X-LeafLock-Audio-Source", "stream");
       out.set("X-LeafLock-Station", "LeafLock Locked In Radio");
       out.set("X-LeafLock-Mount", "https://fm.leaflock.com.au/live.mp3");
-      const icy = upstream.headers.get("icy-name");
-      if (icy) out.set("icy-name", icy);
 
       return new Response(upstream.body, {
         status: upstream.status === 206 ? 206 : 200,
@@ -88,19 +77,20 @@ export async function GET(request: Request) {
     }
   }
 
+  // No continuous encoder — clients use /api/fm/radio-url instead.
   return NextResponse.json(
     {
-      error: "continuous_stream_offline",
+      error: "use_radio_url",
       station: "LeafLock Locked In Radio",
       message:
-        "No continuous Icecast/Liquidsoap stream configured. Set DJ420_UPSTREAM_URL (e.g. https://stream.leaflock.com.au/live.mp3). Per-track YouTube proxy was removed.",
-      docs: "liquidsoap/README.md"
+        "No continuous Icecast configured. Client plays /api/fm/radio-url (direct CDN tracks on native audio).",
+      radioUrl: "/api/fm/radio-url"
     },
     {
       status: 503,
       headers: {
         "Cache-Control": "no-store",
-        "X-LeafLock-Audio-Source": "offline"
+        "X-LeafLock-Audio-Source": "use-radio-url"
       }
     }
   );

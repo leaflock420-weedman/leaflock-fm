@@ -4,9 +4,9 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /**
- * Locked In Radio status.
- * source=stream → continuous Icecast/Liquidsoap (Xiaohongshu-compatible background play)
- * source=offline → encoder not configured / unreachable
+ * source=stream → continuous Icecast (best)
+ * source=radio  → native track CDN chain (works without encoder)
+ * source=offline → nothing available
  */
 
 function isSelfUrl(url: string): boolean {
@@ -36,7 +36,7 @@ export async function GET() {
   for (const candidate of candidates) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
+      const timer = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(candidate, {
         headers: {
           Range: "bytes=0-2047",
@@ -70,11 +70,15 @@ export async function GET() {
     }
   }
 
+  // No Icecast — client uses /api/fm/radio-url (direct CDN track audio).
+  // This is still native <audio> and supports background pull-down controls.
   return NextResponse.json({
-    ok: false,
-    source: "offline",
+    ok: true,
+    source: "radio",
     station: "LeafLock Locked In Radio",
     mount: "https://fm.leaflock.com.au/live.mp3",
-    note: "Set DJ420_UPSTREAM_URL to a continuous Icecast/Liquidsoap MP3 URL. See liquidsoap/README.md. No YouTube/yt-dlp on this mount."
+    radioUrl: "/api/fm/radio-url",
+    model: "native-track-chain",
+    note: "Playing station tracks via native audio CDN URLs (Xiaohongshu-style). Optional: set DJ420_UPSTREAM_URL for continuous Icecast."
   });
 }
