@@ -3,8 +3,11 @@
  *
  * Phones play: <audio id="leaflockRadio" src="…/live.mp3" preload="none" playsinline>
  *
- * Pipeline: station track → yt-dlp download to cache → ffmpeg MP3 → all clients
- * Optional 5s acrossfade. Fallback direct MP3 URLs if YouTube blocks the server IP.
+ * Pipeline: station track → yt-dlp (+ Node JS runtime) → cache → ffmpeg MP3 → all clients
+ * Optional ~5s acrossfade. Fallback free MP3s only if every extractor fails.
+ *
+ * Critical: modern YouTube needs a JS runtime for yt-dlp (EJS). Without
+ * `--js-runtimes node`, extraction fails / bot-checks spike on datacenter IPs.
  */
 
 const http = require("http");
@@ -12,6 +15,8 @@ const fs = require("fs");
 const path = require("path");
 const { spawn, execFile } = require("child_process");
 const { promisify } = require("util");
+const { pipeline } = require("stream/promises");
+const { createWriteStream } = require("fs");
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +25,7 @@ const FM_API_BASE = (process.env.FM_API_BASE || "https://fm.leaflock.com.au").re
 const BITRATE = process.env.MP3_BITRATE || "128k";
 const CROSSFADE_SEC = Math.max(2, Number(process.env.DJ_CROSSFADE_SEC || 5));
 const MEDIA_DIR = process.env.MEDIA_DIR || path.join("/tmp", "leaflock-media");
+const NODE_BIN = process.execPath;
 
 /** Royalty-free direct MP3s so the mount never goes silent if YT is blocked. */
 const FALLBACK_MP3S = [
@@ -30,6 +36,24 @@ const FALLBACK_MP3S = [
   "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-16.mp3"
 ];
 
+const PIPED_BASES = [
+  process.env.PIPED_API_URL,
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://api.piped.private.coffee",
+  "https://pipedapi.nosebs.ru",
+  "https://pipedapi.leptons.xyz"
+].filter(Boolean);
+
+const INVIDIOUS_BASES = [
+  process.env.INVIDIOUS_API_URL,
+  "https://yewtu.be",
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de",
+  "https://invidious.flokinet.to",
+  "https://iv.ggtyler.dev"
+].filter(Boolean);
+
 const clients = new Set();
 let encoder = null;
 let loopRunning = false;
@@ -39,6 +63,7 @@ let lastEvent = "boot";
 let lastTitle = null;
 let lastSource = null;
 let fallbackIndex = 0;
+let cookiesPath = null;
 
 try {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -87,6 +112,18 @@ function writeCookiesFile() {
   }
 }
 
+function cachedFile(videoId) {
+  return ["m4a", "webm", "mp3", "opus", "mp4"]
+    .map((ext) => path.join(MEDIA_DIR, `${videoId}.${ext}`))
+    .find((p) => {
+      try {
+        return fs.statSync(p).size > 50_000;
+      } catch {
+        return false;
+      }
+    });
+}
+
 async function getTrack() {
   const res = await fetch(`${FM_API_BASE}/api/fm/now-playing`, { cache: "no-store" });
   if (!res.ok) throw new Error("now-playing " + res.status);
@@ -111,25 +148,7 @@ async function advance() {
   }
 }
 
-/**
- * Download audio to local cache with yt-dlp (more reliable than -g on some networks).
- */
-async function downloadTrack(videoId) {
-  const outTemplate = path.join(MEDIA_DIR, `${videoId}.%(ext)s`);
-  const existing = ["m4a", "webm", "mp3", "opus"]
-    .map((ext) => path.join(MEDIA_DIR, `${videoId}.${ext}`))
-    .find((p) => {
-      try {
-        return fs.statSync(p).size > 50_000;
-      } catch {
-        return false;
-      }
-    });
-  if (existing) {
-    lastSource = "cache";
-    return existing;
-  }
-
+function baseYtDlpArgs(outTemplate) {
   const args = [
     "-f",
     "bestaudio[ext=m4a]/bestaudio/best",
@@ -139,58 +158,221 @@ async function downloadTrack(videoId) {
     "--no-warnings",
     "--retries",
     "3",
-    "--extractor-args",
-    "youtube:player_client=android,ios,tv,web_embedded"
+    "--fragment-retries",
+    "3",
+    "--concurrent-fragments",
+    "1",
+    // Required for current YouTube (SABR / n-sig / player JS)
+    "--js-runtimes",
+    `node:${NODE_BIN}`,
+    "--remote-components",
+    "ejs:github"
+  ];
+  if (cookiesPath) args.push("--cookies", cookiesPath);
+  return args;
+}
+
+async function downloadViaYtDlp(videoId) {
+  const outTemplate = path.join(MEDIA_DIR, `${videoId}.%(ext)s`);
+  const page = `https://www.youtube.com/watch?v=${videoId}`;
+  const clientCombos = [
+    "youtube:player_client=android_vr,web",
+    "youtube:player_client=android_vr",
+    "youtube:player_client=ios,web",
+    "youtube:player_client=web,android",
+    "youtube:player_client=tv_embedded,web_embedded",
+    "youtube:player_client=mweb,web"
   ];
 
-  const cookies = writeCookiesFile();
-  if (cookies) args.push("--cookies", cookies);
-
-  args.push(`https://www.youtube.com/watch?v=${videoId}`);
-
-  try {
-    await execFileAsync("yt-dlp", args, {
-      timeout: 120_000,
-      maxBuffer: 8 * 1024 * 1024
-    });
-  } catch (e) {
-    // try android-only
+  let lastErr = "";
+  for (const extractorArgs of clientCombos) {
     try {
-      await execFileAsync(
-        "yt-dlp",
-        [
-          "-f",
-          "ba",
-          "-o",
-          outTemplate,
-          "--no-playlist",
-          "--no-warnings",
-          "--extractor-args",
-          "youtube:player_client=android",
-          ...(cookies ? ["--cookies", cookies] : []),
-          `https://www.youtube.com/watch?v=${videoId}`
-        ],
-        { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }
-      );
-    } catch (e2) {
-      throw new Error(
-        (e2.stderr || e2.message || e.message || "yt-dlp download failed").toString().slice(-400)
-      );
+      const args = [
+        ...baseYtDlpArgs(outTemplate),
+        "--extractor-args",
+        extractorArgs,
+        page
+      ];
+      await execFileAsync("yt-dlp", args, {
+        timeout: 150_000,
+        maxBuffer: 8 * 1024 * 1024,
+        env: { ...process.env, PATH: process.env.PATH }
+      });
+      const found = cachedFile(videoId);
+      if (found) {
+        lastSource = "yt-dlp:" + extractorArgs.split("=")[1];
+        return found;
+      }
+    } catch (e) {
+      lastErr = (e.stderr || e.message || String(e)).toString().slice(-500);
+      log("yt-dlp try fail", extractorArgs, lastErr.slice(0, 160));
     }
   }
+  throw new Error(lastErr || "yt-dlp download failed");
+}
 
-  const found = ["m4a", "webm", "mp3", "opus"]
-    .map((ext) => path.join(MEDIA_DIR, `${videoId}.${ext}`))
-    .find((p) => {
-      try {
-        return fs.statSync(p).size > 50_000;
-      } catch {
-        return false;
-      }
+async function downloadViaYtdlCore(videoId) {
+  let ytdl;
+  try {
+    ytdl = require("@distube/ytdl-core");
+  } catch {
+    throw new Error("ytdl-core missing");
+  }
+  const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
+    playerClients: ["ANDROID", "IOS", "TV", "WEB"]
+  });
+  const formats = ytdl
+    .filterFormats(info.formats, "audioonly")
+    .filter((f) => f.url || f.cipher || f.signatureCipher);
+  if (!formats.length) throw new Error("ytdl-core no formats");
+  formats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
+  const f =
+    formats.find((x) => String(x.mimeType || "").includes("mp4")) || formats[0];
+  const ext = (f.container || "m4a").replace(/[^a-z0-9]/gi, "") || "m4a";
+  const dest = path.join(MEDIA_DIR, `${videoId}.${ext}`);
+  await new Promise((resolve, reject) => {
+    const stream = ytdl.downloadFromInfo(info, { format: f });
+    const out = createWriteStream(dest);
+    let bytes = 0;
+    stream.on("data", (c) => {
+      bytes += c.length;
     });
-  if (!found) throw new Error("download missing file");
-  lastSource = "yt-dlp-file";
-  return found;
+    stream.pipe(out);
+    stream.on("error", reject);
+    out.on("error", reject);
+    out.on("finish", () => {
+      if (bytes < 50_000) reject(new Error("ytdl-core short file " + bytes));
+      else resolve();
+    });
+    setTimeout(() => reject(new Error("ytdl-core timeout")), 120_000);
+  });
+  lastSource = "ytdl-core";
+  return dest;
+}
+
+async function fetchAudioUrlToFile(videoId, url, label) {
+  const dest = path.join(MEDIA_DIR, `${videoId}.bin`);
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Accept: "*/*",
+      Referer: "https://www.youtube.com/"
+    },
+    signal: AbortSignal.timeout(120_000)
+  });
+  if (!res.ok || !res.body) throw new Error(label + " http " + res.status);
+  const ct = String(res.headers.get("content-type") || "");
+  let ext = "m4a";
+  if (ct.includes("webm") || ct.includes("opus")) ext = "webm";
+  else if (ct.includes("mpeg") || ct.includes("mp3")) ext = "mp3";
+  else if (ct.includes("mp4") || ct.includes("m4a") || ct.includes("aac")) ext = "m4a";
+  const finalPath = path.join(MEDIA_DIR, `${videoId}.${ext}`);
+  const file = createWriteStream(finalPath);
+  // Node 20: res.body is a web ReadableStream
+  const nodeStream = require("stream").Readable.fromWeb(res.body);
+  await pipeline(nodeStream, file);
+  const size = fs.statSync(finalPath).size;
+  if (size < 50_000) {
+    try {
+      fs.unlinkSync(finalPath);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(label + " short file " + size);
+  }
+  try {
+    if (dest !== finalPath && fs.existsSync(dest)) fs.unlinkSync(dest);
+  } catch {
+    /* ignore */
+  }
+  lastSource = label;
+  return finalPath;
+}
+
+async function resolveViaPiped(videoId) {
+  for (const base of PIPED_BASES) {
+    try {
+      const res = await fetch(`${String(base).replace(/\/$/, "")}/streams/${videoId}`, {
+        headers: { Accept: "application/json", "User-Agent": "LeafLockStream/1.0" },
+        signal: AbortSignal.timeout(12_000)
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = [...(data.audioStreams || [])].filter((s) => s.url?.startsWith("http"));
+      if (!streams.length) continue;
+      streams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      return await fetchAudioUrlToFile(videoId, streams[0].url, "piped:" + base);
+    } catch (e) {
+      log("piped fail", base, e.message);
+    }
+  }
+  return null;
+}
+
+async function resolveViaInvidious(videoId) {
+  for (const base of INVIDIOUS_BASES) {
+    try {
+      const res = await fetch(
+        `${String(base).replace(/\/$/, "")}/api/v1/videos/${videoId}?fields=adaptiveFormats`,
+        {
+          headers: { Accept: "application/json", "User-Agent": "LeafLockStream/1.0" },
+          signal: AbortSignal.timeout(12_000)
+        }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const audio = (data.adaptiveFormats || [])
+        .filter((f) => f.url && String(f.type || "").startsWith("audio/"))
+        .sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0));
+      if (!audio[0]?.url) continue;
+      return await fetchAudioUrlToFile(videoId, audio[0].url, "invidious:" + base);
+    } catch (e) {
+      log("invidious fail", base, e.message);
+    }
+  }
+  return null;
+}
+
+/**
+ * Download audio to local cache. Prefer yt-dlp + Node JS runtime.
+ */
+async function downloadTrack(videoId) {
+  const existing = cachedFile(videoId);
+  if (existing) {
+    lastSource = "cache";
+    return existing;
+  }
+
+  const errors = [];
+
+  try {
+    return await downloadViaYtDlp(videoId);
+  } catch (e) {
+    errors.push("yt-dlp: " + (e.message || e));
+  }
+
+  try {
+    return await downloadViaYtdlCore(videoId);
+  } catch (e) {
+    errors.push("ytdl-core: " + (e.message || e));
+  }
+
+  try {
+    const p = await resolveViaPiped(videoId);
+    if (p) return p;
+  } catch (e) {
+    errors.push("piped: " + (e.message || e));
+  }
+
+  try {
+    const p = await resolveViaInvidious(videoId);
+    if (p) return p;
+  } catch (e) {
+    errors.push("invidious: " + (e.message || e));
+  }
+
+  throw new Error(errors.slice(-3).join(" | ") || "download failed");
 }
 
 function ffmpegToClients(args) {
@@ -326,7 +508,14 @@ async function loop() {
   if (loopRunning) return;
   loopRunning = true;
   lastEvent = "loop-start";
-  log("encoder loop on, mediaDir=", MEDIA_DIR);
+  cookiesPath = writeCookiesFile();
+  log(
+    "encoder loop on, mediaDir=",
+    MEDIA_DIR,
+    "jsRuntime=node",
+    "cookies=",
+    Boolean(cookiesPath)
+  );
 
   while (true) {
     if (clients.size === 0) {
@@ -350,8 +539,7 @@ async function loop() {
         fileA = await downloadTrack(track.videoId);
       } catch (e) {
         lastError = e.message || String(e);
-        log("download fail", track.videoId, lastError.slice(0, 200));
-        // Fallback so the mount never dies
+        log("download fail", track.videoId, lastError.slice(0, 220));
         const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
         fallbackIndex += 1;
         lastTitle = track.title + " (backup bed)";
@@ -370,7 +558,6 @@ async function loop() {
       lastError = null;
       log("play", track.videoId, track.title, "src", lastSource);
 
-      // Play current track fully (minus crossfade tail if next is ready)
       await advance();
       let nextTrack = null;
       try {
@@ -437,7 +624,12 @@ const server = http.createServer((req, res) => {
         lastEvent,
         lastSource,
         crossfadeSec: CROSSFADE_SEC,
-        mount: "/live.mp3"
+        mount: "/live.mp3",
+        jsRuntime: "node",
+        cookiesConfigured: Boolean(
+          process.env.YTDLP_COOKIES || process.env.YOUTUBE_COOKIES
+        ),
+        build: "yt-js-runtime-v1"
       })
     );
     return;
@@ -479,8 +671,10 @@ server.keepAliveTimeout = 0;
 server.headersTimeout = 0;
 if ("requestTimeout" in server) server.requestTimeout = 0;
 
+cookiesPath = writeCookiesFile();
+
 server.listen(PORT, "0.0.0.0", () => {
-  log("listening", PORT, "api", FM_API_BASE);
+  log("listening", PORT, "api", FM_API_BASE, "node", NODE_BIN);
 });
 
 process.on("uncaughtException", (e) => log("uncaught", e.message));
