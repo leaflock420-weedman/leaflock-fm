@@ -3,11 +3,13 @@
  *
  * Phones play: <audio id="leaflockRadio" src="…/live.mp3" preload="none" playsinline>
  *
- * Pipeline: station track → yt-dlp (+ Node JS runtime) → cache → ffmpeg MP3 → all clients
- * Optional ~5s acrossfade. Fallback free MP3s only if every extractor fails.
+ * ONE always-on encoder for every listener (true radio mount):
+ *   - Encoder runs from process boot and never stops when clients disconnect
+ *   - New listeners only attach — never kill/restart ffmpeg on join
+ *   - Same live MP3 bytes → same song on every device
  *
- * Critical: modern YouTube needs a JS runtime for yt-dlp (EJS). Without
- * `--js-runtimes node`, extraction fails / bot-checks spike on datacenter IPs.
+ * Pipeline: station track → cache/yt-dlp → ffmpeg MP3 → all clients
+ * Optional ~5s acrossfade. Fallback free MP3s only if every extractor fails.
  */
 
 const http = require("http");
@@ -55,6 +57,10 @@ const INVIDIOUS_BASES = [
 ].filter(Boolean);
 
 const clients = new Set();
+/** Recent encoded MP3 so late joiners attach mid-stream without restarting the encoder. */
+const RECENT_BYTES = 320 * 1024;
+const recentChunks = [];
+let recentTotal = 0;
 let encoder = null;
 let loopRunning = false;
 let lastVideoId = null;
@@ -64,6 +70,10 @@ let lastTitle = null;
 let lastSource = null;
 let fallbackIndex = 0;
 let cookiesPath = null;
+/** After cold start, honor station offset once so we join the shared timeline mid-song. */
+let honorStationOffsetOnce = true;
+let trackStartedAtMs = 0;
+let trackDurationSec = 0;
 
 try {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -75,12 +85,34 @@ function log(...a) {
   console.log(new Date().toISOString(), "[stream]", ...a);
 }
 
+function pushRecent(buf) {
+  if (!buf || !buf.length) return;
+  recentChunks.push(buf);
+  recentTotal += buf.length;
+  while (recentTotal > RECENT_BYTES && recentChunks.length > 1) {
+    const drop = recentChunks.shift();
+    recentTotal -= drop.length;
+  }
+}
+
 function broadcast(buf) {
+  pushRecent(buf);
   for (const res of [...clients]) {
     try {
       if (!res.writableEnded && !res.destroyed) res.write(buf);
     } catch {
       clients.delete(res);
+    }
+  }
+}
+
+/** Attach listener to the live edge — do not touch the shared encoder. */
+function attachClient(res) {
+  for (const chunk of recentChunks) {
+    try {
+      if (!res.writableEnded && !res.destroyed) res.write(chunk);
+    } catch {
+      return;
     }
   }
 }
@@ -504,13 +536,17 @@ async function playHold(sec = 3) {
   ]);
 }
 
+/**
+ * Always-on radio loop. Keeps encoding even with zero listeners so every phone
+ * that tunes in joins the SAME live edge (same song, same place).
+ */
 async function loop() {
   if (loopRunning) return;
   loopRunning = true;
   lastEvent = "loop-start";
   cookiesPath = writeCookiesFile();
   log(
-    "encoder loop on, mediaDir=",
+    "always-on encoder, mediaDir=",
     MEDIA_DIR,
     "jsRuntime=node",
     "cookies=",
@@ -518,25 +554,22 @@ async function loop() {
   );
 
   while (true) {
-    if (clients.size === 0) {
-      killEncoder();
-      await new Promise((r) => setTimeout(r, 1000));
-      continue;
-    }
-
     try {
       let track = await getTrack();
       lastEvent = "track:" + track.videoId;
 
-      if (lastVideoId && track.videoId === lastVideoId) {
+      // Avoid replaying the same id if station has not advanced yet
+      if (
+        lastVideoId &&
+        track.videoId === lastVideoId &&
+        !String(lastVideoId).endsWith("-fb")
+      ) {
         await advance();
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, 500));
         track = await getTrack();
       }
 
       let fileA = null;
-      // Prefer cache / extractors. If a track is missing, skip a few station
-      // advances before falling back to free beds (keeps rotation on playlist).
       for (let attempt = 0; attempt < 6 && !fileA; attempt++) {
         try {
           if (attempt > 0) {
@@ -552,48 +585,79 @@ async function loop() {
           fileA = null;
         }
       }
+
       if (!fileA) {
         const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
         fallbackIndex += 1;
         lastTitle = (track.title || "LeafLock") + " (backup bed)";
         lastVideoId = (track.videoId || "x") + "-fb";
+        trackStartedAtMs = Date.now();
+        trackDurationSec = 90;
         await playRemoteMp3(fb);
         await advance();
+        honorStationOffsetOnce = false;
         continue;
       }
 
-      const start =
-        track.offset > 5 && track.offset < track.duration - 25 ? track.offset : 0;
-      const remain = Math.max(25, track.duration - start);
+      // Cold start only: join mid-track to match global station clock.
+      // After that the encoder owns the timeline so all listeners stay aligned.
+      let start = 0;
+      if (
+        honorStationOffsetOnce &&
+        track.offset > 5 &&
+        track.offset < track.duration - 25
+      ) {
+        start = track.offset;
+      }
+      honorStationOffsetOnce = false;
+      const remain = Math.max(20, track.duration - start);
 
       lastVideoId = track.videoId;
       lastTitle = track.title;
       lastError = null;
-      log("play", track.videoId, track.title, "src", lastSource);
+      trackStartedAtMs = Date.now();
+      trackDurationSec = remain;
+      log("play", track.videoId, track.title, "src", lastSource, "start", start);
 
-      await advance();
-      let nextTrack = null;
+      // Peek next for crossfade WITHOUT advancing station yet
+      let nextMeta = null;
       try {
-        nextTrack = await getTrack();
-        if (nextTrack.videoId === track.videoId) nextTrack = null;
+        const np = await fetch(`${FM_API_BASE}/api/fm/now-playing`, {
+          cache: "no-store"
+        }).then((r) => r.json());
+        if (np.nextVideoId && np.nextVideoId !== track.videoId) {
+          nextMeta = {
+            videoId: np.nextVideoId,
+            title: np.nextTitle || "Up next",
+            duration: 240
+          };
+        }
       } catch {
-        nextTrack = null;
+        nextMeta = null;
       }
 
-      if (nextTrack) {
+      if (nextMeta) {
         try {
-          const fileB = await downloadTrack(nextTrack.videoId);
+          const fileB = await downloadTrack(nextMeta.videoId);
           await playCrossfadeFiles(fileA, fileB, start, remain);
-          lastVideoId = nextTrack.videoId;
-          lastTitle = nextTrack.title;
+          // Current song finished (blended into next). Station → next, then finish next.
+          await advance();
+          lastVideoId = nextMeta.videoId;
+          lastTitle = nextMeta.title;
+          trackStartedAtMs = Date.now();
+          trackDurationSec = Math.max(30, (nextMeta.duration || 240) - CROSSFADE_SEC);
           await playLocalFile(fileB, { start: CROSSFADE_SEC });
+          // Finished next track; advance once more for the following loop iteration
+          await advance();
           continue;
         } catch (e) {
           log("crossfade fail", e.message);
           await playLocalFile(fileA, { start, duration: remain });
+          await advance();
         }
       } else {
         await playLocalFile(fileA, { start, duration: remain });
+        await advance();
       }
     } catch (e) {
       lastError = e.message || String(e);
@@ -615,6 +679,7 @@ async function loop() {
       } catch {
         /* ignore */
       }
+      honorStationOffsetOnce = false;
     }
   }
 }
@@ -651,7 +716,14 @@ const server = http.createServer((req, res) => {
           process.env.YTDLP_COOKIES || process.env.YOUTUBE_COOKIES
         ),
         cachedTracks,
-        build: "yt-seed-cache-v2"
+        alwaysOn: true,
+        trackStartedAtMs,
+        trackDurationSec,
+        liveOffsetSec:
+          trackStartedAtMs > 0
+            ? Math.max(0, (Date.now() - trackStartedAtMs) / 1000)
+            : 0,
+        build: "sync-always-on-v1"
       })
     );
     return;
@@ -739,17 +811,21 @@ const server = http.createServer((req, res) => {
   if (urlPath === "/live.mp3" || urlPath === "/live") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store, no-cache");
+    res.setHeader("Cache-Control", "no-store, no-cache, no-transform");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-LeafLock-Audio-Source", "continuous-encoder");
     res.setHeader("X-LeafLock-Station", "LeafLock Locked In Radio");
+    res.setHeader("X-LeafLock-Sync", "always-on-shared");
     res.setHeader("icy-name", "LeafLock FM 104.2");
     res.setHeader("icy-description", "DJ420 - Locked In Radio");
+    if (lastTitle) res.setHeader("icy-title", lastTitle);
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     clients.add(res);
-    log("client+", clients.size);
+    // Join live edge only — never kill/restart the shared encoder
+    attachClient(res);
+    log("client+", clients.size, "title", lastTitle || "-");
 
     const onClose = () => {
       clients.delete(res);
@@ -758,7 +834,7 @@ const server = http.createServer((req, res) => {
     req.on("close", onClose);
     res.on("close", onClose);
 
-    void playHold(1).catch(() => undefined);
+    // Encoder is always-on from boot; keep a safety start if it ever died
     void loop();
     return;
   }
@@ -776,6 +852,8 @@ cookiesPath = writeCookiesFile();
 
 server.listen(PORT, "0.0.0.0", () => {
   log("listening", PORT, "api", FM_API_BASE, "node", NODE_BIN);
+  // Start shared radio timeline immediately (do not wait for first listener)
+  void loop();
 });
 
 process.on("uncaughtException", (e) => log("uncaught", e.message));
