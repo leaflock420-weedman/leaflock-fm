@@ -86,9 +86,8 @@ export default function FmListenMode() {
   return (
     <div className="space-y-6">
       {/*
-        Permanent native radio element — Xiaohongshu / real radio model.
-        Fixed continuous stream URL. Never remounted with React key.
-        Media Session branding is set in leaflock-locked-in-radio.ts
+        Permanent native continuous stream — NEVER remount with React key.
+        src is the real continuous encoder URL (not YouTube, not yt-dlp per request).
       */}
       <audio
         id={LEAFLOCK_RADIO_AUDIO_ID}
@@ -115,7 +114,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">LeafLock Radio</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Locked In Radio — continuous stream, works after you leave Chrome.
+              Continuous stream — keeps playing after you leave Chrome.
             </span>
           </button>
           <button
@@ -129,7 +128,7 @@ export default function FmListenMode() {
           >
             <span className="block text-sm font-semibold">Private jukebox</span>
             <span className="mt-1 block text-xs text-zinc-500">
-              Your own YouTube shuffle + DJ blend (foreground).
+              YouTube shuffle + DJ blend (foreground).
             </span>
           </button>
         </div>

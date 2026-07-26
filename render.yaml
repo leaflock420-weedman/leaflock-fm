@@ -1,10 +1,9 @@
 services:
+  # Website (Next.js) — does NOT encode radio audio
   - type: web
     name: leaflock-fm
     runtime: node
-    # Paid Starter — always-on (no free-tier cold starts)
     plan: starter
-    # Live radio uses ytdl-core URL resolve + 302 redirect (no stream proxy = no mid-track timeout).
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health
@@ -16,13 +15,6 @@ services:
         value: production
       - key: HOSTNAME
         value: 0.0.0.0
-      # Only set these when a Render disk is mounted at /var/data.
-      # Forcing /var/data without a disk causes: EACCES mkdir '/var/data'
-      # and kills the instrumentation hook on boot.
-      # - key: DATABASE_DIR
-      #   value: /var/data/leaflock
-      # - key: STATION_DATA_DIR
-      #   value: /var/data/leaflock
       - key: DATABASE_URL
         value: postgresql://build:build@localhost:5432/build
       - key: APP_URL
@@ -33,18 +25,14 @@ services:
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
       - key: NEXT_PUBLIC_YOUTUBE_PLAYLIST_ID
         value: PLJFdPoHnfyMNIbriwNRh06u2z1Z5vZ7va
-      # Do not proxy multi-MB audio through Render (that is what made live.mp3 stop).
-      - key: DJ420_FORCE_PROXY
-        value: "0"
-      - key: DJ420_DISABLE_TRACK_AUDIO
-        value: "0"
-      # Optional: real Icecast/Liquidsoap URL (best continuous radio)
-      # DJ420_UPSTREAM_URL: https://your-icecast:8000/live.mp3
-      # Permanent native <audio> src for Live Room (same-origin continuous mount)
+      # Permanent native <audio> points at the SEPARATE continuous encoder service
       - key: NEXT_PUBLIC_STREAM_URL
-        value: https://fm.leaflock.com.au/live.mp3
-      # When Icecast is live, set this in the Render dashboard (not in git if secret):
-      # DJ420_UPSTREAM_URL=https://stream.leaflock.com.au/live.mp3
+        value: https://leaflock-stream.onrender.com/live.mp3
+      # Optional: proxy /live.mp3 on the main site to the stream service
+      - key: DJ420_UPSTREAM_URL
+        value: https://leaflock-stream.onrender.com/live.mp3
+      - key: PRIMARY_STREAM_URL
+        value: https://leaflock-stream.onrender.com/live.mp3
       - key: YOUTUBE_API_KEY
         value: AIzaSyD4f1Oc6R9xC58TSiS99BvayekV29rZO2A
       - key: FM_ADMIN_SECRET
@@ -59,6 +47,27 @@ services:
         value: https://www.leaflock.com.au
       - key: MOBILE_GAME_URL
         value: https://wegrow.leaflock.com.au
+
+  # Continuous radio encoder — separate from Next.js (Xiaohongshu model)
+  - type: web
+    name: leaflock-stream
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./stream-server/Dockerfile
+    dockerContext: ./stream-server
+    healthCheckPath: /health
+    numInstances: 1
+    envVars:
+      - key: FM_API_BASE
+        value: https://fm.leaflock.com.au
+      - key: DJ_CROSSFADE_SEC
+        value: "5"
+      - key: MP3_BITRATE
+        value: 128k
+      - key: PORT
+        value: "8000"
+      - key: FM_ADMIN_SECRET
+        value: leaflock-fm-desk-2026
 
   - type: cron
     name: dj420-warmup

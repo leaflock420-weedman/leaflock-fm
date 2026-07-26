@@ -1,12 +1,10 @@
 /**
- * Public Live Room engine — permanent native <audio> + station Media Session.
- *
- * Matches the working pattern:
- *   <audio id="leaflockRadio" src="…/live.mp3" preload="none" playsinline>
- *   MediaSession title/artist/album = LeafLock Radio / Locked In Radio / FM 104.2
- *   play/pause only — no next/previous/seek
- *
- * Song titles are never pushed to the phone controller (website UI can still show them).
+ * Exact continuous-radio client:
+ * - one permanent native <audio id="leaflockRadio">
+ * - fixed stream URL (never changes, no cache-bust)
+ * - Media Session station branding only
+ * - audioSession.type = "playback" when available
+ * - visibilitychange does nothing (no pause / reload / src swap)
  */
 
 import {
@@ -17,8 +15,36 @@ import {
 } from "@/lib/leaflock-radio-stream";
 
 let userWantsPlay = false;
-let reconnectTimer: number | null = null;
 let volume01 = 0.85;
+let visibilityBound = false;
+
+function setAudioSessionPlayback() {
+  try {
+    // Safari / supporting browsers: long-form music playback
+    const nav = navigator as Navigator & {
+      audioSession?: { type: string };
+    };
+    if (nav.audioSession) {
+      nav.audioSession.type = "playback";
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function bindVisibilityNoop() {
+  if (typeof document === "undefined" || visibilityBound) return;
+  visibilityBound = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      // Do not pause.
+      // Do not reload.
+      // Do not replace src.
+      // Do not destroy the player.
+      return;
+    }
+  });
+}
 
 function getRadioEl(): HTMLAudioElement | null {
   if (typeof document === "undefined") return null;
@@ -35,94 +61,17 @@ function getRadioEl(): HTMLAudioElement | null {
     document.body.appendChild(el);
   }
 
-  bindOnce(el);
-  ensureFixedSrc(el);
-  return el;
-}
-
-function ensureFixedSrc(el: HTMLAudioElement) {
+  // Fixed continuous stream URL — set once, never timestamp-bust
   const url = getLockedInRadioStreamUrl();
-  // Stable src only — never cache-bust with Date.now()
-  if (!el.getAttribute("src") || el.getAttribute("src") !== url) {
-    // Compare without resolving absolute vs relative quirks
-    try {
-      if (el.src && new URL(el.src).href === new URL(url, window.location.origin).href) {
-        return;
-      }
-    } catch {
-      // fall through
-    }
+  if (el.getAttribute("src") !== url) {
     el.setAttribute("src", url);
     el.src = url;
   }
+
+  bindVisibilityNoop();
+  return el;
 }
 
-function bindOnce(el: HTMLAudioElement) {
-  if (el.dataset.leaflockBound === "1") return;
-  el.dataset.leaflockBound = "1";
-
-  el.addEventListener("playing", () => {
-    applyStationMediaSession(true);
-  });
-
-  el.addEventListener("pause", () => {
-    if (!userWantsPlay) {
-      applyStationMediaSession(false);
-      return;
-    }
-    // OS may pause when backgrounded — re-open continuous stream (same URL).
-    scheduleReconnect(300);
-  });
-
-  el.addEventListener("ended", () => {
-    // Continuous Icecast should not end; reconnect same mount if it does.
-    if (userWantsPlay) scheduleReconnect(200);
-  });
-
-  el.addEventListener("error", () => {
-    if (userWantsPlay) scheduleReconnect(1200);
-  });
-
-  el.addEventListener("stalled", () => {
-    if (userWantsPlay) scheduleReconnect(2000);
-  });
-}
-
-function scheduleReconnect(ms: number) {
-  if (typeof window === "undefined") return;
-  if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = null;
-    if (!userWantsPlay) return;
-    void resumeFixedMount();
-  }, ms);
-}
-
-async function resumeFixedMount(): Promise<boolean> {
-  const el = getRadioEl();
-  if (!el || !userWantsPlay) return false;
-
-  ensureFixedSrc(el);
-  el.muted = false;
-  el.volume = Math.min(1, Math.max(0.2, volume01));
-
-  try {
-    // Soft reconnect for Icecast without changing the logical stream URL
-    el.load();
-  } catch {
-    // ignore
-  }
-
-  try {
-    await el.play();
-    applyStationMediaSession(true);
-    return !el.paused;
-  } catch {
-    return false;
-  }
-}
-
-/** Permanent station branding for Android/iOS pull-down + lock screen. */
 export function applyStationMediaSession(playing: boolean) {
   if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
 
@@ -135,18 +84,17 @@ export function applyStationMediaSession(playing: boolean) {
     });
     navigator.mediaSession.playbackState = playing ? "playing" : "paused";
 
-    navigator.mediaSession.setActionHandler("play", async () => {
-      await startLockedInRadio(volume01);
+    navigator.mediaSession.setActionHandler("play", () => {
+      void playRadio();
     });
     navigator.mediaSession.setActionHandler("pause", () => {
-      pauseLockedInRadio();
+      pauseRadio();
     });
     navigator.mediaSession.setActionHandler("stop", () => {
-      pauseLockedInRadio();
+      pauseRadio();
     });
-    // Radio station: no track skip / seek
-    navigator.mediaSession.setActionHandler("previoustrack", null);
     navigator.mediaSession.setActionHandler("nexttrack", null);
+    navigator.mediaSession.setActionHandler("previoustrack", null);
     navigator.mediaSession.setActionHandler("seekto", null);
     navigator.mediaSession.setActionHandler("seekforward", null);
     navigator.mediaSession.setActionHandler("seekbackward", null);
@@ -155,61 +103,70 @@ export function applyStationMediaSession(playing: boolean) {
   }
 }
 
-/** Call from user gesture (Tune in / Join). */
-export async function startLockedInRadio(vol = 0.85): Promise<boolean> {
+/** Core play — user gesture or Media Session play. */
+export async function playRadio(): Promise<boolean> {
   userWantsPlay = true;
-  volume01 = vol;
+  setAudioSessionPlayback();
 
-  const el = getRadioEl();
-  if (!el) return false;
+  const radio = getRadioEl();
+  if (!radio) return false;
 
-  ensureFixedSrc(el);
-  el.loop = false;
-  el.muted = false;
-  el.volume = Math.min(1, Math.max(0.2, vol));
-  el.preload = "none";
+  radio.muted = false;
+  radio.volume = Math.min(1, Math.max(0.2, volume01));
 
   applyStationMediaSession(true);
 
   try {
-    await el.play();
-    return !el.paused;
-  } catch {
-    try {
-      el.load();
-      await el.play();
-      return !el.paused;
-    } catch {
-      return false;
+    await radio.play();
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = "playing";
     }
+    return !radio.paused;
+  } catch {
+    return false;
   }
 }
 
-export function pauseLockedInRadio(): void {
+export function pauseRadio(): void {
   userWantsPlay = false;
-  if (reconnectTimer !== null) {
-    window.clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  const radio = getRadioEl();
   try {
-    getRadioEl()?.pause();
+    radio?.pause();
   } catch {
     // ignore
+  }
+  if (typeof navigator !== "undefined" && "mediaSession" in navigator) {
+    try {
+      navigator.mediaSession.playbackState = "paused";
+    } catch {
+      // ignore
+    }
   }
   applyStationMediaSession(false);
 }
 
+/** @deprecated use playRadio */
+export async function startLockedInRadio(vol = 0.85): Promise<boolean> {
+  volume01 = vol;
+  return playRadio();
+}
+
+/** @deprecated use pauseRadio */
+export function pauseLockedInRadio(): void {
+  pauseRadio();
+}
+
 export function isLockedInRadioPlaying(): boolean {
-  const el = getRadioEl();
-  return Boolean(userWantsPlay && el && !el.paused);
+  const radio = getRadioEl();
+  return Boolean(userWantsPlay && radio && !radio.paused);
 }
 
 export function setLockedInRadioVolume(vol: number, muted = false): void {
   volume01 = vol;
-  const el = getRadioEl();
-  if (!el) return;
-  el.volume = Math.min(1, Math.max(0, vol));
-  el.muted = muted || vol === 0;
+  const radio = getRadioEl();
+  if (!radio) return;
+  radio.volume = Math.min(1, Math.max(0, vol));
+  radio.muted = muted || vol === 0;
 }
 
 export function ensureLockedInRadioElement(): HTMLAudioElement | null {
@@ -220,7 +177,8 @@ export function getLockedInRadioWantsPlay(): boolean {
   return userWantsPlay;
 }
 
-/** Always continuous stream mode for public live room. */
 export function getLockedInRadioMode(): "stream" {
   return "stream";
 }
+
+export { applyStationMediaSession as applyStationMediaSessionExport };

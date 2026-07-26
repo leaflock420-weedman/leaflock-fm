@@ -5,38 +5,23 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * Continuous Locked In Radio mount.
- * Proxies Icecast/Liquidsoap when DJ420_UPSTREAM_URL (or PRIMARY_STREAM_URL) is set.
- *
- * Public client uses a permanent native <audio src="/live.mp3"> (or NEXT_PUBLIC_STREAM_URL).
- * Phone Media Session shows only: LeafLock Radio / Locked In Radio / FM 104.2
+ * Optional same-origin proxy to the continuous encoder service.
+ * Preferred: phones play NEXT_PUBLIC_STREAM_URL (leaflock-stream) directly.
  */
 
 function isSelfUrl(url: string): boolean {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
-    if (
+    return (
       host === "fm.leaflock.com.au" ||
       host === "localhost" ||
       host === "127.0.0.1" ||
-      host.endsWith(".onrender.com")
-    ) {
-      return (
-        u.pathname === "/live.mp3" ||
-        u.pathname === "/live" ||
-        u.pathname === "/api/fm/listen" ||
-        u.pathname.startsWith("/api/fm/listen")
-      );
-    }
-  } catch {
-    return (
-      url.startsWith("/live.mp3") ||
-      url.startsWith("/live") ||
-      url.startsWith("/api/fm/listen")
+      (host.endsWith(".onrender.com") && u.pathname.includes("fm"))
     );
+  } catch {
+    return true;
   }
-  return false;
 }
 
 function externalCandidates(): string[] {
@@ -44,17 +29,17 @@ function externalCandidates(): string[] {
     process.env.DJ420_UPSTREAM_URL,
     process.env.PRIMARY_STREAM_URL,
     process.env.ICECAST_URL,
-    // Optional dedicated host (if DNS points at your encoder)
     process.env.STREAM_HOST_URL
   ]
     .map((v) => v?.trim())
-    .filter((v): v is string => Boolean(v && !isSelfUrl(v)));
+    .filter((v): v is string => Boolean(v && v.length > 8));
 }
 
 export async function GET(request: Request) {
   const range = request.headers.get("range");
 
   for (const url of externalCandidates()) {
+    if (isSelfUrl(url) && !url.includes("leaflock-stream")) continue;
     try {
       const headers: Record<string, string> = {
         "User-Agent": "LeafLockFM/1.0 LockedInRadio",
@@ -76,33 +61,23 @@ export async function GET(request: Request) {
       out.set("Access-Control-Allow-Origin", "*");
       out.set("X-LeafLock-Audio-Source", "stream");
       out.set("X-LeafLock-Station", "LeafLock Locked In Radio");
-      out.set("X-LeafLock-Mount", "https://fm.leaflock.com.au/live.mp3");
 
       return new Response(upstream.body, {
         status: upstream.status === 206 ? 206 : 200,
         headers: out
       });
     } catch (error) {
-      console.error("[live] upstream failed", url, error);
+      console.error("[live.mp3] upstream failed", url, error);
     }
   }
 
   return NextResponse.json(
     {
       error: "continuous_stream_offline",
-      station: "LeafLock Radio",
-      artist: "Locked In Radio",
-      album: "FM 104.2",
       message:
-        "No continuous encoder on DJ420_UPSTREAM_URL. Point that env at Icecast (e.g. https://stream.leaflock.com.au/live.mp3). Public Live Room is native <audio> only — no YouTube."
+        "Continuous encoder offline. Expected leaflock-stream service at DJ420_UPSTREAM_URL."
     },
-    {
-      status: 503,
-      headers: {
-        "Cache-Control": "no-store",
-        "X-LeafLock-Audio-Source": "offline"
-      }
-    }
+    { status: 503, headers: { "Cache-Control": "no-store" } }
   );
 }
 
