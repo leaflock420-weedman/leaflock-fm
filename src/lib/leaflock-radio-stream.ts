@@ -17,12 +17,22 @@ export const LEAFLOCK_RADIO_STATION = {
 
 /**
  * Permanent <audio src> — never append ?t= timestamps.
- * Prefer env (deployed continuous encoder), then canonical stream host.
+ * Uses the continuous encoder service (separate from the Next.js website).
+ * stream.leaflock.com.au can CNAME to this later; until DNS exists we use Render.
  */
 export function getLockedInRadioStreamUrl(): string {
   const fromEnv = process.env.NEXT_PUBLIC_STREAM_URL?.trim();
-  if (fromEnv) return fromEnv;
-  return LEAFLOCK_STREAM_CANONICAL;
+  // Prefer dedicated encoder URL (not the website silent/offline mount)
+  if (
+    fromEnv &&
+    (fromEnv.includes("leaflock-stream") ||
+      fromEnv.includes("stream.leaflock.com.au") ||
+      fromEnv.includes(":8000"))
+  ) {
+    return fromEnv;
+  }
+  // Live continuous encoder (Docker service) — works today without DNS
+  return "https://leaflock-stream.onrender.com/live.mp3";
 }
 
 export function radioArtwork(): MediaImage[] {
