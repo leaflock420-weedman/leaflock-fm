@@ -535,15 +535,28 @@ async function loop() {
       }
 
       let fileA = null;
-      try {
-        fileA = await downloadTrack(track.videoId);
-      } catch (e) {
-        lastError = e.message || String(e);
-        log("download fail", track.videoId, lastError.slice(0, 220));
+      // Prefer cache / extractors. If a track is missing, skip a few station
+      // advances before falling back to free beds (keeps rotation on playlist).
+      for (let attempt = 0; attempt < 6 && !fileA; attempt++) {
+        try {
+          if (attempt > 0) {
+            await advance();
+            await new Promise((r) => setTimeout(r, 400));
+            track = await getTrack();
+            lastEvent = "skip:" + track.videoId;
+          }
+          fileA = await downloadTrack(track.videoId);
+        } catch (e) {
+          lastError = e.message || String(e);
+          log("download fail", track.videoId, lastError.slice(0, 220));
+          fileA = null;
+        }
+      }
+      if (!fileA) {
         const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
         fallbackIndex += 1;
-        lastTitle = track.title + " (backup bed)";
-        lastVideoId = track.videoId + "-fb";
+        lastTitle = (track.title || "LeafLock") + " (backup bed)";
+        lastVideoId = (track.videoId || "x") + "-fb";
         await playRemoteMp3(fb);
         await advance();
         continue;
