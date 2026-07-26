@@ -374,7 +374,9 @@ const server = http.createServer((req, res) => {
     res.setHeader("X-LeafLock-Audio-Source", "continuous-encoder");
     res.setHeader("X-LeafLock-Station", "LeafLock Locked In Radio");
     res.setHeader("icy-name", "LeafLock FM 104.2");
-    res.setHeader("icy-description", "DJ420 — Locked In Radio");
+    res.setHeader("icy-description", "DJ420 - Locked In Radio");
+    // Flush headers to client immediately (avoid gateway timeout on slow encoder start)
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     clients.add(res);
     log("client+", clients.size);
@@ -386,6 +388,8 @@ const server = http.createServer((req, res) => {
     req.on("close", onClose);
     res.on("close", onClose);
 
+    // Kick a short silent pad so first-byte arrives before ytdl/ffmpeg warms
+    void playHold(1).catch(() => undefined);
     void loop();
     return;
   }
