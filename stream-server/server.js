@@ -64,17 +64,59 @@ async function advanceStation() {
 }
 
 async function resolveAudioUrl(videoId) {
-  const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
-    playerClients: ["ANDROID", "IOS", "TV"]
+  try {
+    const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
+      playerClients: ["ANDROID", "IOS", "TV"]
+    });
+    const formats = ytdl.filterFormats(info.formats, "audioonly");
+    if (!formats.length) throw new Error(`No audio formats for ${videoId}`);
+    formats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
+    const preferred =
+      formats.find((f) => String(f.mimeType || f.container || "").includes("mp4")) ||
+      formats[0];
+    if (!preferred?.url) throw new Error(`No url for ${videoId}`);
+    return preferred.url;
+  } catch (e) {
+    log("ytdl failed", videoId, e.message);
+    throw e;
+  }
+}
+
+/** Hold tone so the continuous mount never goes silent between failures. */
+function playHoldTone(seconds = 8) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=220:sample_rate=44100",
+        "-t",
+        String(seconds),
+        "-af",
+        "volume=0.08",
+        "-ac",
+        "2",
+        "-ab",
+        BITRATE,
+        "-f",
+        "mp3",
+        "pipe:1"
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    encoder = ff;
+    ff.stdout.on("data", (chunk) => broadcast(chunk));
+    ff.on("error", reject);
+    ff.on("close", () => {
+      encoder = null;
+      resolve();
+    });
   });
-  const formats = ytdl.filterFormats(info.formats, "audioonly");
-  if (!formats.length) throw new Error(`No audio formats for ${videoId}`);
-  formats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-  const preferred =
-    formats.find((f) => String(f.mimeType || f.container || "").includes("mp4")) ||
-    formats[0];
-  if (!preferred?.url) throw new Error(`No url for ${videoId}`);
-  return preferred.url;
 }
 
 function broadcast(chunk) {
@@ -224,7 +266,12 @@ async function encodeLoop() {
       // (ffmpeg next process starts immediately after)
     } catch (e) {
       log("encode error", e.message || e);
-      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        await playHoldTone(6);
+      } catch (holdErr) {
+        log("hold tone failed", holdErr.message || holdErr);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
       try {
         await advanceStation();
       } catch {
@@ -232,6 +279,43 @@ async function encodeLoop() {
       }
     }
   }
+}
+
+/** Minimal MPEG frame padding so proxies get bytes before ffmpeg is warm. */
+function silentMp3Pad() {
+  // Very short generated pad via ffmpeg once, cached
+  return null;
+}
+
+let padBuffer = null;
+function ensurePad() {
+  if (padBuffer) return padBuffer;
+  try {
+    const { execFileSync } = require("child_process");
+    padBuffer = execFileSync(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=stereo",
+        "-t",
+        "0.5",
+        "-ab",
+        "128k",
+        "-f",
+        "mp3",
+        "pipe:1"
+      ],
+      { maxBuffer: 2 * 1024 * 1024 }
+    );
+  } catch {
+    padBuffer = Buffer.alloc(0);
+  }
+  return padBuffer;
 }
 
 function sendIcyHeaders(res) {
@@ -246,6 +330,15 @@ function sendIcyHeaders(res) {
     "X-LeafLock-Station": "LeafLock Locked In Radio",
     "X-LeafLock-Audio-Source": "continuous-encoder"
   });
+  // Immediate first bytes so Cloudflare/Render don't 502 on slow TTFB
+  const pad = ensurePad();
+  if (pad && pad.length) {
+    try {
+      res.write(pad);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 const server = http.createServer((req, res) => {
