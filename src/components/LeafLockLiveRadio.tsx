@@ -3,7 +3,7 @@
 /**
  * Public Live Room UI.
  * Phone controller: LeafLock FM 104.2 / DJ420 — Locked In Radio only.
- * Website may show separate now-playing (not on Media Session).
+ * Website now-playing + up-next come from stream-authoritative /api/fm/now-playing.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -22,13 +22,20 @@ import {
 
 type Props = { joinNonce?: number };
 
+type NowPlayingView = {
+  title: string;
+  artist: string | null;
+  upNext: string | null;
+  thumbnail: string | null;
+};
+
 export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [volume, setVolume] = useState(0.85);
   const [muted, setMuted] = useState(false);
-  const [webNowPlaying, setWebNowPlaying] = useState<string | null>(null);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingView | null>(null);
   const streamUrl = getLockedInRadioStreamUrl();
 
   const tuneIn = useCallback(async () => {
@@ -61,20 +68,25 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
         if (!res.ok) return;
         const data = (await res.json()) as {
           current?: { title?: string; artist?: string };
+          nextTitle?: string | null;
+          upNext?: string | null;
+          thumbnail?: string | null;
         };
         if (data.current?.title) {
-          setWebNowPlaying(
-            data.current.artist
-              ? `${data.current.title} — ${data.current.artist}`
-              : data.current.title
-          );
+          setNowPlaying({
+            title: data.current.title,
+            artist: data.current.artist ?? null,
+            upNext: data.nextTitle ?? data.upNext ?? null,
+            thumbnail: data.thumbnail ?? null
+          });
         }
       } catch {
         // ignore
       }
     };
     void load();
-    const id = window.setInterval(() => void load(), 20_000);
+    // Fast poll so every listener sees the same current / up-next together
+    const id = window.setInterval(() => void load(), 4_000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -131,14 +143,37 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
         />
       </div>
 
-      {webNowPlaying ? (
-        <div className="mt-4 rounded-xl border border-white/5 bg-black/40 px-4 py-3">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-600">
-            Website only (not on lock screen)
+      <div className="mt-5 flex gap-4 rounded-2xl border border-white/5 bg-black/50 p-4">
+        {nowPlaying?.thumbnail ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={nowPlaying.thumbnail}
+            alt=""
+            className="h-20 w-20 shrink-0 rounded-xl object-cover"
+          />
+        ) : (
+          <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-zinc-600">
+            <Radio className="h-8 w-8" />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-500/90">
+            Now playing
           </p>
-          <p className="mt-1 text-sm text-zinc-300">{webNowPlaying}</p>
+          <p className="mt-1 truncate text-lg font-semibold text-white">
+            {nowPlaying?.title || "Tuning in…"}
+          </p>
+          {nowPlaying?.artist ? (
+            <p className="mt-0.5 truncate text-sm text-zinc-400">{nowPlaying.artist}</p>
+          ) : null}
+          <p className="mt-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-600">
+            Up next
+          </p>
+          <p className="mt-0.5 truncate text-sm text-zinc-300">
+            {nowPlaying?.upNext || "—"}
+          </p>
         </div>
-      ) : null}
+      </div>
 
       {error ? <p className="mt-3 text-sm text-amber-400">{error}</p> : null}
 

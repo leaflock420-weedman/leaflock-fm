@@ -176,12 +176,17 @@ async function bootstrapStation(): Promise<StationState> {
   };
 }
 
+/**
+ * Peek only — never mutate rotation / never reshuffle.
+ * (Mutating + random extend on peek made different listeners see different "Up next".)
+ */
 function peekNextInRotation(state: StationState): PlaylistVideo | null {
   const nextIndex = state.rotationIndex + 1;
-  if (nextIndex >= state.rotation.length) {
-    state.rotation = state.rotation.concat(createShuffledRotation(state.rotation));
+  if (nextIndex < state.rotation.length) {
+    return state.rotation[nextIndex] ?? null;
   }
-  return state.rotation[nextIndex] ?? null;
+  // End of list: stable preview until advanceStation reshuffles for real
+  return state.rotation[0] ?? null;
 }
 
 const PLAYLIST_TRACKS_BEFORE_REQUEST = 3;
@@ -346,23 +351,21 @@ export async function getPublicStation(): Promise<PublicStation> {
       };
     }
 
-    let guard = 0;
-    while (guard < 2) {
-      const elapsed =
-        (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
-      const duration = trackDurationSec(state.current);
-
-      if (elapsed < duration - 1) break;
-
+    // Live Room timeline is owned by leaflock-stream (POST stream-next).
+    // Do NOT wall-clock auto-advance here — that raced the encoder and gave
+    // different "current / up next" to different phones near song boundaries.
+    // Safety: only advance if a track is stuck far past its duration (stream dead).
+    const elapsedStuck =
+      (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
+    const durationStuck = trackDurationSec(state.current);
+    if (elapsedStuck > durationStuck + 180) {
       state = await advanceStation(state);
       await saveStationState(state);
-      guard += 1;
     }
 
     const elapsed = (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
     const duration = trackDurationSec(state.current);
-    const peekState = { ...state };
-    const upcoming = peekNextInRotation(peekState);
+    const upcoming = await peekUpcomingTrack(state);
 
     const listeners = await getPublicLiveListeners();
     const dj420 = await getDj420State();
@@ -395,8 +398,7 @@ export async function forceAdvanceStation(): Promise<PublicStation> {
 
     const elapsed = (Date.now() - new Date(state.trackStartedAt).getTime()) / 1000;
     const duration = trackDurationSec(state.current);
-    const peekState = { ...state };
-    const upcoming = peekNextInRotation(peekState);
+    const upcoming = await peekUpcomingTrack(state);
     const listeners = await getPublicLiveListeners();
     const dj420 = await getDj420State();
 
@@ -422,29 +424,74 @@ export async function resetLiveStation(): Promise<PublicStation> {
   return getPublicStation();
 }
 
-/** Server-authoritative now playing — permanent station host timeline for all listeners. */
-export async function getNowPlaying(): Promise<NowPlayingPayload> {
-  const [station, control, dj420] = await Promise.all([
+/**
+ * Server-authoritative now playing.
+ * Browsers: prefer continuous-encoder stream-sync (same song for everyone).
+ * Encoder: pass preferStream:false so it reads pure station rotation (no feedback loop).
+ */
+export async function getNowPlaying(options?: {
+  preferStream?: boolean;
+}): Promise<NowPlayingPayload> {
+  const preferStream = options?.preferStream !== false;
+  const { isStreamSyncFresh, loadStreamLiveSync, streamSyncOffsetSec } = await import(
+    "@/lib/stream-live-sync"
+  );
+
+  const [station, control, dj420, streamSync] = await Promise.all([
     getPublicStation(),
     getStationControl(),
-    getDj420State()
+    getDj420State(),
+    preferStream ? loadStreamLiveSync() : Promise.resolve(null)
   ]);
   const state = await loadStationState();
   const upcoming = state ? await peekUpcomingTrack(state) : null;
-  const offsetSeconds = station.offsetSeconds;
+
+  const useStream = preferStream && isStreamSyncFresh(streamSync);
+  const current =
+    useStream && streamSync
+      ? {
+          ...station.current,
+          videoId: streamSync.videoId,
+          title: streamSync.title || station.current.title,
+          artist: streamSync.artist || station.current.artist,
+          durationSec: streamSync.durationSec || station.current.durationSec
+        }
+      : station.current;
+
+  const nextVideoId =
+    useStream && streamSync?.nextVideoId
+      ? streamSync.nextVideoId
+      : (upcoming?.videoId ?? null);
+  const nextTitle =
+    useStream && streamSync?.nextTitle
+      ? streamSync.nextTitle
+      : (upcoming?.title ?? station.upNext);
+  const trackStartedAt =
+    useStream && streamSync?.startedAt
+      ? streamSync.startedAt
+      : (state?.trackStartedAt ?? new Date().toISOString());
+  const durationSec =
+    useStream && streamSync?.durationSec
+      ? streamSync.durationSec
+      : trackDurationSec(current);
+  const offsetSeconds =
+    useStream && streamSync ? streamSyncOffsetSec(streamSync) : station.offsetSeconds;
 
   return {
     ...station,
+    current,
+    upNext: nextTitle,
+    offsetSeconds,
     serverTime: new Date().toISOString(),
-    trackStartedAt: state?.trackStartedAt ?? new Date().toISOString(),
-    durationSec: trackDurationSec(station.current),
+    trackStartedAt,
+    durationSec,
     currentOffsetSeconds: offsetSeconds,
-    nextVideoId: upcoming?.videoId ?? null,
-    nextTitle: upcoming?.title ?? station.upNext,
+    nextVideoId,
+    nextTitle,
     mode: control.mode,
     hostName: "DJ420",
     hostStatus: resolveDj420Status(dj420),
-    thumbnail: station.current.videoId ? playlistThumbnail(station.current.videoId) : null,
+    thumbnail: current.videoId ? playlistThumbnail(current.videoId) : null,
     activePlaylist: station.playlistId
   };
 }

@@ -57,8 +57,11 @@ const INVIDIOUS_BASES = [
 ].filter(Boolean);
 
 const clients = new Set();
-/** Recent encoded MP3 so late joiners attach mid-stream without restarting the encoder. */
-const RECENT_BYTES = 320 * 1024;
+/**
+ * Tiny ring only for MP3 frame sync on join — NOT seconds of past audio.
+ * A large buffer made late joiners play ~20s behind everyone else.
+ */
+const RECENT_BYTES = 6 * 1024;
 const recentChunks = [];
 let recentTotal = 0;
 let encoder = null;
@@ -67,7 +70,10 @@ let lastVideoId = null;
 let lastError = null;
 let lastEvent = "boot";
 let lastTitle = null;
+let lastArtist = null;
 let lastSource = null;
+let nextVideoId = null;
+let nextTitle = null;
 let fallbackIndex = 0;
 let cookiesPath = null;
 /** After cold start, honor station offset once so we join the shared timeline mid-song. */
@@ -157,15 +163,21 @@ function cachedFile(videoId) {
 }
 
 async function getTrack() {
-  const res = await fetch(`${FM_API_BASE}/api/fm/now-playing`, { cache: "no-store" });
+  // Raw station rotation — never the stream-sync overlay (avoids feedback loop).
+  const res = await fetch(`${FM_API_BASE}/api/fm/now-playing?for=encoder`, {
+    cache: "no-store"
+  });
   if (!res.ok) throw new Error("now-playing " + res.status);
   const data = await res.json();
   if (!data.current?.videoId) throw new Error("no track");
   return {
     videoId: data.current.videoId,
     title: data.current.title || "LeafLock",
+    artist: data.current.artist || null,
     offset: Number(data.currentOffsetSeconds ?? data.offsetSeconds ?? 0),
-    duration: Number(data.durationSec || data.current.durationSec || 240)
+    duration: Number(data.durationSec || data.current.durationSec || 240),
+    nextVideoId: data.nextVideoId || null,
+    nextTitle: data.nextTitle || data.upNext || null
   };
 }
 
@@ -177,6 +189,31 @@ async function advance() {
     });
   } catch (e) {
     log("advance", e.message);
+  }
+}
+
+/** Push what is actually on the mount so every website shows the same current/up-next. */
+async function publishSync(meta) {
+  try {
+    await fetch(`${FM_API_BASE}/api/fm/stream-sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-stream-secret": process.env.FM_ADMIN_SECRET || ""
+      },
+      body: JSON.stringify({
+        videoId: meta.videoId,
+        title: meta.title,
+        artist: meta.artist || null,
+        nextVideoId: meta.nextVideoId || null,
+        nextTitle: meta.nextTitle || null,
+        durationSec: meta.durationSec || null,
+        startedAt: meta.startedAt || new Date().toISOString(),
+        source: meta.source || lastSource
+      })
+    });
+  } catch (e) {
+    log("stream-sync", e.message);
   }
 }
 
@@ -590,9 +627,22 @@ async function loop() {
         const fb = FALLBACK_MP3S[fallbackIndex % FALLBACK_MP3S.length];
         fallbackIndex += 1;
         lastTitle = (track.title || "LeafLock") + " (backup bed)";
+        lastArtist = track.artist || null;
         lastVideoId = (track.videoId || "x") + "-fb";
+        nextVideoId = track.nextVideoId || null;
+        nextTitle = track.nextTitle || null;
         trackStartedAtMs = Date.now();
         trackDurationSec = 90;
+        await publishSync({
+          videoId: track.videoId,
+          title: lastTitle,
+          artist: lastArtist,
+          nextVideoId,
+          nextTitle,
+          durationSec: 90,
+          startedAt: new Date(trackStartedAtMs).toISOString(),
+          source: "fallback-mp3"
+        });
         await playRemoteMp3(fb);
         await advance();
         honorStationOffsetOnce = false;
@@ -614,40 +664,65 @@ async function loop() {
 
       lastVideoId = track.videoId;
       lastTitle = track.title;
+      lastArtist = track.artist || null;
+      nextVideoId = track.nextVideoId || null;
+      nextTitle = track.nextTitle || null;
       lastError = null;
       trackStartedAtMs = Date.now();
       trackDurationSec = remain;
       log("play", track.videoId, track.title, "src", lastSource, "start", start);
 
+      await publishSync({
+        videoId: track.videoId,
+        title: track.title,
+        artist: track.artist,
+        nextVideoId,
+        nextTitle,
+        durationSec: remain,
+        startedAt: new Date(trackStartedAtMs).toISOString(),
+        source: lastSource
+      });
+
       // Peek next for crossfade WITHOUT advancing station yet
       let nextMeta = null;
-      try {
-        const np = await fetch(`${FM_API_BASE}/api/fm/now-playing`, {
-          cache: "no-store"
-        }).then((r) => r.json());
-        if (np.nextVideoId && np.nextVideoId !== track.videoId) {
-          nextMeta = {
-            videoId: np.nextVideoId,
-            title: np.nextTitle || "Up next",
-            duration: 240
-          };
-        }
-      } catch {
-        nextMeta = null;
+      if (track.nextVideoId && track.nextVideoId !== track.videoId) {
+        nextMeta = {
+          videoId: track.nextVideoId,
+          title: track.nextTitle || "Up next",
+          duration: 240
+        };
       }
 
       if (nextMeta) {
         try {
           const fileB = await downloadTrack(nextMeta.videoId);
           await playCrossfadeFiles(fileA, fileB, start, remain);
-          // Current song finished (blended into next). Station → next, then finish next.
+          // Current finished into next — one advance, then finish next, then one advance.
           await advance();
           lastVideoId = nextMeta.videoId;
           lastTitle = nextMeta.title;
+          lastArtist = null;
           trackStartedAtMs = Date.now();
           trackDurationSec = Math.max(30, (nextMeta.duration || 240) - CROSSFADE_SEC);
+          // Refresh up-next after advance
+          try {
+            const t2 = await getTrack();
+            nextVideoId = t2.nextVideoId || null;
+            nextTitle = t2.nextTitle || null;
+          } catch {
+            nextVideoId = null;
+            nextTitle = null;
+          }
+          await publishSync({
+            videoId: nextMeta.videoId,
+            title: nextMeta.title,
+            nextVideoId,
+            nextTitle,
+            durationSec: trackDurationSec,
+            startedAt: new Date(trackStartedAtMs).toISOString(),
+            source: lastSource
+          });
           await playLocalFile(fileB, { start: CROSSFADE_SEC });
-          // Finished next track; advance once more for the following loop iteration
           await advance();
           continue;
         } catch (e) {
@@ -717,13 +792,16 @@ const server = http.createServer((req, res) => {
         ),
         cachedTracks,
         alwaysOn: true,
+        lastArtist,
+        nextVideoId,
+        nextTitle,
         trackStartedAtMs,
         trackDurationSec,
         liveOffsetSec:
           trackStartedAtMs > 0
             ? Math.max(0, (Date.now() - trackStartedAtMs) / 1000)
             : 0,
-        build: "sync-always-on-v1"
+        build: "sync-meta-v2"
       })
     );
     return;
