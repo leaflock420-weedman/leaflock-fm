@@ -1,15 +1,15 @@
 /**
  * Continuous LeafLock radio encoder (separate from Next.js).
  *
- * Phones play: <audio id="leaflockRadio" src="…/live.mp3" preload="none" playsinline>
+ * Phones play: <audio id="leaflockRadio" src="…/live.mp3?edge=…" preload="none" playsinline>
  *
- * ONE always-on encoder for every listener (true radio mount):
- *   - Encoder runs from process boot and never stops when clients disconnect
- *   - New listeners only attach — never kill/restart ffmpeg on join
- *   - Same live MP3 bytes → same song on every device
- *
- * Pipeline: station track → cache/yt-dlp → ffmpeg MP3 → all clients
- * Optional ~5s acrossfade. Fallback free MP3s only if every extractor fails.
+ * Sync rules (critical):
+ * - FFmpeg must pace local/fallback files with -readrate 1 so we do not dump
+ *   future audio into every browser buffer faster than real time.
+ * - broadcast() respects res.write() backpressure; slow clients are dropped
+ *   so they can reconnect at the live edge.
+ * - ONE always-on paced timeline for every listener.
+ * - Server-side acrossfade is part of that same paced timeline.
  */
 
 const http = require("http");
@@ -28,8 +28,11 @@ const BITRATE = process.env.MP3_BITRATE || "128k";
 const CROSSFADE_SEC = Math.max(2, Number(process.env.DJ_CROSSFADE_SEC || 5));
 const MEDIA_DIR = process.env.MEDIA_DIR || path.join("/tmp", "leaflock-media");
 const NODE_BIN = process.execPath;
+/** ~2s of 128kbps MP3. Beyond this the client is behind live and must rejoin. */
+const MAX_CLIENT_BUFFER = Number(process.env.MAX_CLIENT_BUFFER || 48 * 1024);
+/** Tiny join ring for MP3 frame sync only — not seconds of past audio. */
+const RECENT_BYTES = 4 * 1024;
 
-/** Royalty-free direct MP3s so the mount never goes silent if YT is blocked. */
 const FALLBACK_MP3S = [
   "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
   "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
@@ -56,12 +59,8 @@ const INVIDIOUS_BASES = [
   "https://iv.ggtyler.dev"
 ].filter(Boolean);
 
+/** @type {Set<import('http').ServerResponse>} */
 const clients = new Set();
-/**
- * Tiny ring only for MP3 frame sync on join — NOT seconds of past audio.
- * A large buffer made late joiners play ~20s behind everyone else.
- */
-const RECENT_BYTES = 6 * 1024;
 const recentChunks = [];
 let recentTotal = 0;
 let encoder = null;
@@ -76,10 +75,10 @@ let nextVideoId = null;
 let nextTitle = null;
 let fallbackIndex = 0;
 let cookiesPath = null;
-/** After cold start, honor station offset once so we join the shared timeline mid-song. */
 let honorStationOffsetOnce = true;
 let trackStartedAtMs = 0;
 let trackDurationSec = 0;
+let droppedSlowClients = 0;
 
 try {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -101,23 +100,75 @@ function pushRecent(buf) {
   }
 }
 
+function clientBacklog(res) {
+  // Node HTTP response / socket buffered bytes
+  const w = typeof res.writableLength === "number" ? res.writableLength : 0;
+  const s = res.socket && typeof res.socket.writableLength === "number" ? res.socket.writableLength : 0;
+  return Math.max(w, s);
+}
+
+function dropClient(res, reason) {
+  clients.delete(res);
+  droppedSlowClients += 1;
+  try {
+    if (!res.writableEnded) res.end();
+  } catch {
+    /* ignore */
+  }
+  try {
+    res.destroy();
+  } catch {
+    /* ignore */
+  }
+  log("client drop", reason, "left", clients.size);
+}
+
 function broadcast(buf) {
   pushRecent(buf);
   for (const res of [...clients]) {
     try {
-      if (!res.writableEnded && !res.destroyed) res.write(buf);
+      if (res.writableEnded || res.destroyed) {
+        clients.delete(res);
+        continue;
+      }
+      if (clientBacklog(res) > MAX_CLIENT_BUFFER) {
+        dropClient(res, "backlog-before-write");
+        continue;
+      }
+      const ok = res.write(buf);
+      if (!ok) {
+        // Socket is full — if backlog already oversized, disconnect so they rejoin live edge
+        if (clientBacklog(res) > MAX_CLIENT_BUFFER) {
+          dropClient(res, "backpressure");
+        } else {
+          // Wait briefly for drain; if still stuck later, next chunk will drop
+          res.once("drain", () => {
+            /* backpressure released */
+          });
+        }
+      }
     } catch {
       clients.delete(res);
     }
   }
 }
 
-/** Attach listener to the live edge — do not touch the shared encoder. */
+/** Attach listener to the live edge — never kill/restart the shared encoder. */
 function attachClient(res) {
   for (const chunk of recentChunks) {
     try {
-      if (!res.writableEnded && !res.destroyed) res.write(chunk);
+      if (res.writableEnded || res.destroyed) return;
+      if (clientBacklog(res) > MAX_CLIENT_BUFFER) {
+        dropClient(res, "backlog-attach");
+        return;
+      }
+      const ok = res.write(chunk);
+      if (!ok && clientBacklog(res) > MAX_CLIENT_BUFFER) {
+        dropClient(res, "backpressure-attach");
+        return;
+      }
     } catch {
+      clients.delete(res);
       return;
     }
   }
@@ -163,7 +214,6 @@ function cachedFile(videoId) {
 }
 
 async function getTrack() {
-  // Raw station rotation — never the stream-sync overlay (avoids feedback loop).
   const res = await fetch(`${FM_API_BASE}/api/fm/now-playing?for=encoder`, {
     cache: "no-store"
   });
@@ -192,7 +242,6 @@ async function advance() {
   }
 }
 
-/** Push what is actually on the mount so every website shows the same current/up-next. */
 async function publishSync(meta) {
   try {
     await fetch(`${FM_API_BASE}/api/fm/stream-sync`, {
@@ -231,7 +280,6 @@ function baseYtDlpArgs(outTemplate) {
     "3",
     "--concurrent-fragments",
     "1",
-    // Required for current YouTube (SABR / n-sig / player JS)
     "--js-runtimes",
     `node:${NODE_BIN}`,
     "--remote-components",
@@ -248,9 +296,7 @@ async function downloadViaYtDlp(videoId) {
     "youtube:player_client=android_vr,web",
     "youtube:player_client=android_vr",
     "youtube:player_client=ios,web",
-    "youtube:player_client=web,android",
-    "youtube:player_client=tv_embedded,web_embedded",
-    "youtube:player_client=mweb,web"
+    "youtube:player_client=web,android"
   ];
 
   let lastErr = "";
@@ -320,7 +366,6 @@ async function downloadViaYtdlCore(videoId) {
 }
 
 async function fetchAudioUrlToFile(videoId, url, label) {
-  const dest = path.join(MEDIA_DIR, `${videoId}.bin`);
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -338,7 +383,6 @@ async function fetchAudioUrlToFile(videoId, url, label) {
   else if (ct.includes("mp4") || ct.includes("m4a") || ct.includes("aac")) ext = "m4a";
   const finalPath = path.join(MEDIA_DIR, `${videoId}.${ext}`);
   const file = createWriteStream(finalPath);
-  // Node 20: res.body is a web ReadableStream
   const nodeStream = require("stream").Readable.fromWeb(res.body);
   await pipeline(nodeStream, file);
   const size = fs.statSync(finalPath).size;
@@ -349,11 +393,6 @@ async function fetchAudioUrlToFile(videoId, url, label) {
       /* ignore */
     }
     throw new Error(label + " short file " + size);
-  }
-  try {
-    if (dest !== finalPath && fs.existsSync(dest)) fs.unlinkSync(dest);
-  } catch {
-    /* ignore */
   }
   lastSource = label;
   return finalPath;
@@ -403,9 +442,6 @@ async function resolveViaInvidious(videoId) {
   return null;
 }
 
-/**
- * Download audio to local cache. Prefer yt-dlp + Node JS runtime.
- */
 async function downloadTrack(videoId) {
   const existing = cachedFile(videoId);
   if (existing) {
@@ -414,33 +450,28 @@ async function downloadTrack(videoId) {
   }
 
   const errors = [];
-
   try {
     return await downloadViaYtDlp(videoId);
   } catch (e) {
     errors.push("yt-dlp: " + (e.message || e));
   }
-
   try {
     return await downloadViaYtdlCore(videoId);
   } catch (e) {
     errors.push("ytdl-core: " + (e.message || e));
   }
-
   try {
     const p = await resolveViaPiped(videoId);
     if (p) return p;
   } catch (e) {
     errors.push("piped: " + (e.message || e));
   }
-
   try {
     const p = await resolveViaInvidious(videoId);
     if (p) return p;
   } catch (e) {
     errors.push("invidious: " + (e.message || e));
   }
-
   throw new Error(errors.slice(-3).join(" | ") || "download failed");
 }
 
@@ -466,25 +497,32 @@ function ffmpegToClients(args) {
   });
 }
 
+const MP3_OUT = [
+  "-vn",
+  "-c:a",
+  "libmp3lame",
+  "-b:a",
+  BITRATE,
+  "-ar",
+  "44100",
+  "-ac",
+  "2",
+  "-f",
+  "mp3",
+  "pipe:1"
+];
+
+/**
+ * Real-time paced file input. Without -readrate 1, ffmpeg dumps the whole
+ * file into browser buffers and every listener drifts differently.
+ */
 async function playLocalFile(file, { start = 0, duration = null } = {}) {
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin"];
+  // Input seek first, then pace at realtime
   if (start > 2) args.push("-ss", String(Math.floor(start)));
-  args.push("-i", file);
+  args.push("-readrate", "1", "-i", file);
   if (duration && duration > 5) args.push("-t", String(Math.floor(duration)));
-  args.push(
-    "-vn",
-    "-c:a",
-    "libmp3lame",
-    "-b:a",
-    BITRATE,
-    "-ar",
-    "44100",
-    "-ac",
-    "2",
-    "-f",
-    "mp3",
-    "pipe:1"
-  );
+  args.push(...MP3_OUT);
   await ffmpegToClients(args);
 }
 
@@ -495,23 +533,18 @@ async function playRemoteMp3(url) {
     "-loglevel",
     "error",
     "-nostdin",
+    "-readrate",
+    "1",
     "-i",
     url,
-    "-vn",
-    "-c:a",
-    "libmp3lame",
-    "-b:a",
-    BITRATE,
-    "-ar",
-    "44100",
-    "-ac",
-    "2",
-    "-f",
-    "mp3",
-    "pipe:1"
+    ...MP3_OUT
   ]);
 }
 
+/**
+ * Server-side DJ crossfade: body of A (paced) + acrossfade into B (paced).
+ * Still one continuous live timeline for all listeners.
+ */
 async function playCrossfadeFiles(fileA, fileB, startA, remainA) {
   const bodyDur = Math.max(12, remainA - CROSSFADE_SEC);
   if (bodyDur > 15) {
@@ -527,36 +560,34 @@ async function playCrossfadeFiles(fileA, fileB, startA, remainA) {
     String(ssA),
     "-t",
     String(CROSSFADE_SEC + 1),
+    "-readrate",
+    "1",
     "-i",
     fileA,
     "-ss",
     "0",
+    "-t",
+    String(CROSSFADE_SEC + 1),
+    "-readrate",
+    "1",
     "-i",
     fileB,
     "-filter_complex",
     `[0:a][1:a]acrossfade=d=${CROSSFADE_SEC}:c1=tri:c2=tri[a]`,
     "-map",
     "[a]",
-    "-c:a",
-    "libmp3lame",
-    "-b:a",
-    BITRATE,
-    "-ar",
-    "44100",
-    "-ac",
-    "2",
-    "-f",
-    "mp3",
-    "pipe:1"
+    ...MP3_OUT
   ]);
 }
 
 async function playHold(sec = 3) {
   lastSource = "hold";
+  // Synthetic source: use -re for realtime (lavfi has no file readrate)
   await ffmpegToClients([
     "-hide_banner",
     "-loglevel",
     "error",
+    "-re",
     "-f",
     "lavfi",
     "-i",
@@ -574,21 +605,15 @@ async function playHold(sec = 3) {
 }
 
 /**
- * Always-on radio loop — ONE shared timeline, ONE song at a time.
- *
- * Critical for multi-listener sync:
- * - Never play two full tracks per loop (old crossfade path double-advanced)
- * - Keep bytes flowing between tracks so browsers do not stall/reconnect differently
- * - All HTTP clients only attach; never restart the mount per listener
+ * Always-on paced radio loop with optional server-side crossfade.
  */
 async function loop() {
   if (loopRunning) return;
   loopRunning = true;
   lastEvent = "loop-start";
   cookiesPath = writeCookiesFile();
-  log("always-on single-timeline encoder", MEDIA_DIR);
+  log("always-on paced encoder readrate=1", MEDIA_DIR, "maxClientBuf", MAX_CLIENT_BUFFER);
 
-  /** Prefetch next file while current plays */
   let prefetched = /** @type {{ videoId: string, file: string } | null} */ (null);
 
   while (true) {
@@ -596,7 +621,6 @@ async function loop() {
       let track = await getTrack();
       lastEvent = "track:" + track.videoId;
 
-      // Station still on what we just finished → nudge once
       const cleanLast = lastVideoId && String(lastVideoId).replace(/-fb$/, "");
       if (cleanLast && track.videoId === cleanLast) {
         await advance();
@@ -654,7 +678,6 @@ async function loop() {
         continue;
       }
 
-      // Only seek mid-track on cold boot (join shared station position once)
       let start = 0;
       if (
         honorStationOffsetOnce &&
@@ -687,21 +710,83 @@ async function loop() {
         source: lastSource
       });
 
-      // Prefetch up-next while this song plays (does not advance station)
+      // Prefetch next while current plays
+      let nextMeta = null;
       if (nextVideoId && nextVideoId !== track.videoId) {
+        nextMeta = {
+          videoId: nextVideoId,
+          title: nextTitle || "Up next",
+          duration: 240
+        };
         const peekId = nextVideoId;
         void downloadTrack(peekId)
           .then((f) => {
             prefetched = { videoId: peekId, file: f };
           })
-          .catch(() => {
-            /* ignore */
-          });
+          .catch(() => undefined);
       }
 
-      // ONE song only — then advance once. No double-play / double-advance.
-      await playLocalFile(fileA, { start, duration: remain });
-      await advance();
+      if (nextMeta) {
+        try {
+          let fileB =
+            prefetched && prefetched.videoId === nextMeta.videoId
+              ? prefetched.file
+              : null;
+          if (!fileB) fileB = await downloadTrack(nextMeta.videoId);
+          prefetched = null;
+
+          // Paced body + paced acrossfade (continuous live timeline)
+          await playCrossfadeFiles(fileA, fileB, start, remain);
+
+          // After blend, station is on next; finish rest of B at realtime
+          await advance();
+          lastVideoId = nextMeta.videoId;
+          lastTitle = nextMeta.title;
+          lastArtist = null;
+          trackStartedAtMs = Date.now();
+          trackDurationSec = Math.max(30, (nextMeta.duration || 240) - CROSSFADE_SEC);
+
+          try {
+            const t2 = await getTrack();
+            nextVideoId = t2.nextVideoId || null;
+            nextTitle = t2.nextTitle || null;
+          } catch {
+            nextVideoId = null;
+            nextTitle = null;
+          }
+
+          await publishSync({
+            videoId: nextMeta.videoId,
+            title: nextMeta.title,
+            nextVideoId,
+            nextTitle,
+            durationSec: trackDurationSec,
+            startedAt: new Date(trackStartedAtMs).toISOString(),
+            source: lastSource
+          });
+
+          // Prefetch following track
+          if (nextVideoId && nextVideoId !== nextMeta.videoId) {
+            const peekId = nextVideoId;
+            void downloadTrack(peekId)
+              .then((f) => {
+                prefetched = { videoId: peekId, file: f };
+              })
+              .catch(() => undefined);
+          }
+
+          await playLocalFile(fileB, { start: CROSSFADE_SEC });
+          await advance();
+          continue;
+        } catch (e) {
+          log("crossfade fail", e.message);
+          await playLocalFile(fileA, { start, duration: remain });
+          await advance();
+        }
+      } else {
+        await playLocalFile(fileA, { start, duration: remain });
+        await advance();
+      }
     } catch (e) {
       lastError = e.message || String(e);
       lastEvent = "err";
@@ -754,6 +839,9 @@ const server = http.createServer((req, res) => {
         ),
         cachedTracks,
         alwaysOn: true,
+        readrate: 1,
+        maxClientBuffer: MAX_CLIENT_BUFFER,
+        droppedSlowClients,
         lastArtist,
         nextVideoId,
         nextTitle,
@@ -763,14 +851,12 @@ const server = http.createServer((req, res) => {
           trackStartedAtMs > 0
             ? Math.max(0, (Date.now() - trackStartedAtMs) / 1000)
             : 0,
-        build: "sync-single-v3"
+        build: "paced-readrate-v4"
       })
     );
     return;
   }
 
-  // Authenticated cache seed: POST /admin/seed?videoId=XXX  body=raw audio bytes
-  // Used when Render IPs are YouTube-bot-blocked — seed from a residential machine.
   if (urlPath === "/admin/seed" && req.method === "POST") {
     const secret = req.headers["x-stream-secret"] || "";
     const expected = process.env.FM_ADMIN_SECRET || "";
@@ -789,10 +875,8 @@ const server = http.createServer((req, res) => {
       res.end("videoId required");
       return;
     }
-    const ext = String(u.searchParams.get("ext") || "m4a").replace(
-      /[^a-z0-9]/gi,
-      ""
-    ) || "m4a";
+    const ext =
+      String(u.searchParams.get("ext") || "m4a").replace(/[^a-z0-9]/gi, "") || "m4a";
     const dest = path.join(MEDIA_DIR, `${videoId}.${ext}`);
     const chunks = [];
     let total = 0;
@@ -802,7 +886,6 @@ const server = http.createServer((req, res) => {
         res.statusCode = 413;
         res.end("too large");
         req.destroy();
-        return;
       }
       chunks.push(c);
     });
@@ -854,22 +937,27 @@ const server = http.createServer((req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, no-transform, must-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
-    // Live mount: discourage range/seek buffering that desyncs listeners
     res.setHeader("Accept-Ranges", "none");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("X-LeafLock-Audio-Source", "continuous-encoder");
     res.setHeader("X-LeafLock-Station", "LeafLock Locked In Radio");
-    res.setHeader("X-LeafLock-Sync", "always-on-shared");
+    res.setHeader("X-LeafLock-Sync", "paced-readrate");
     res.setHeader("icy-name", "LeafLock FM 104.2");
     res.setHeader("icy-description", "DJ420 - Locked In Radio");
     if (lastTitle) res.setHeader("icy-title", lastTitle);
     if (lastVideoId) res.setHeader("X-LeafLock-VideoId", String(lastVideoId));
+    // HighWaterMark for socket so backpressure engages sooner
+    if (res.socket) {
+      try {
+        res.socket.setNoDelay(true);
+      } catch {
+        /* ignore */
+      }
+    }
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     clients.add(res);
-    // Join live edge only — never kill/restart the shared encoder
     attachClient(res);
     log("client+", clients.size, "title", lastTitle || "-");
 
@@ -897,7 +985,6 @@ cookiesPath = writeCookiesFile();
 
 server.listen(PORT, "0.0.0.0", () => {
   log("listening", PORT, "api", FM_API_BASE, "node", NODE_BIN);
-  // Start shared radio timeline immediately (do not wait for first listener)
   void loop();
 });
 

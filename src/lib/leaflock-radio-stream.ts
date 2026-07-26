@@ -21,7 +21,7 @@ export const LEAFLOCK_RADIO_STATION = {
 } as const;
 
 /**
- * Permanent <audio src> — never append ?t= timestamps.
+ * Base continuous mount URL (no cache-bust). Used for display / static markup.
  */
 export function getLockedInRadioStreamUrl(): string {
   // Allow override only when pointing at a real continuous encoder host.
@@ -41,9 +41,20 @@ export function getLockedInRadioStreamUrl(): string {
     ) {
       return LEAFLOCK_STREAM_URL;
     }
-    return fromEnv;
+    return fromEnv.split("?")[0];
   }
   return LEAFLOCK_STREAM_URL;
+}
+
+/**
+ * Live-edge URL for explicit Tune In / resume after Pause.
+ * ?edge= forces a new progressive request so the browser cannot resume a
+ * stale buffer from a previous connection. Song-change must NOT use this.
+ */
+export function getLiveEdgeStreamUrl(): string {
+  const base = getLockedInRadioStreamUrl().split("?")[0];
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}edge=${Date.now()}`;
 }
 
 export function radioArtwork(): MediaImage[] {

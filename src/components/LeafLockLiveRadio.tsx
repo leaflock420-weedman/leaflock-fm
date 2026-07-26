@@ -11,7 +11,6 @@ import { Loader2, Pause, Play, Radio, Volume2, VolumeX } from "lucide-react";
 import {
   ensureLockedInRadioElement,
   isLockedInRadioPlaying,
-  noteSharedTrackVideoId,
   pauseRadio,
   playRadio,
   setLockedInRadioVolume
@@ -81,16 +80,13 @@ export default function LeafLockLiveRadio({ joinNonce = 0 }: Props) {
             thumbnail: data.thumbnail ?? null
           });
         }
-        // Snap every tuned-in phone to the live edge when the shared song changes
-        if (data.current?.videoId) {
-          void noteSharedTrackVideoId(data.current.videoId);
-        }
+        // Metadata only — do NOT reconnect audio when the song changes.
       } catch {
         // ignore
       }
     };
     void load();
-    // Fast poll: shared metadata + live-edge resync trigger
+    // Poll for visible Now Playing / Up next only (stream stays open)
     const id = window.setInterval(() => void load(), 3_000);
     return () => window.clearInterval(id);
   }, []);
